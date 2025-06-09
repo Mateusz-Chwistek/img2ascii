@@ -92,7 +92,7 @@ Photo by <a href="https://unsplash.com/@farhat099?utm_content=creditCopyText&utm
 
 ### Scaling
 * Scale 2
-<br><img src="images/example_scale_2.jpg" alt="Example scale: 2" width="500"><br>
+<br><img src="images/example_simple.jpg" alt="Example scale: 2" width="500"><br>
 
 * Scale 4
 <br><img src="images/example_scale_4.jpg" alt="Example scale: 4" width="500"><br>
