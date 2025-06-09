@@ -1,11 +1,10 @@
 import requests
 import numpy as np
 from io import BytesIO
-from os import PathLike
 from pathlib import Path
-from pathlib import PurePosixPath 
 from urllib.parse import urlparse
-from PIL import Image, ImageFont, ImageDraw
+from PIL.Image import DecompressionBombError
+from PIL import Image, ImageFont, ImageDraw, UnidentifiedImageError
 
 class ImgConverterError(Exception):
     """Base ImgConverter exception"""
@@ -32,19 +31,55 @@ class TargetExistsError(ImgConverterError):
     pass
 
 class ImgConverter:
-    _SUPPORTED_EXT = (".jpeg", ".jpg", ".png", ".webp")
+    _SUPPORTED_FORMATS = ("jpeg", "jpg", "png", "webp",
+                      "tif", "tiff", "bmp", "ppm",
+                      "pgm", "pbm", "ico")
     _CHARSETS = {
         "simple": "@%#*+=-:. ",
         "advanced": "@$B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvu "
                     "nxrjft/\\|()1}{][?-_+~i!lI;:,\"^`'. "
     }
     _MAX_SCALE = 6
+    _PIXELS_LIMIT = 8_847_360 # DCI-4K 4096x2160
+    _BYTES_PER_PIXEL_WORST = 8 # 4 channels * 2 bytes
+    _IMAGE_SIZE_LIMIT = _PIXELS_LIMIT * _BYTES_PER_PIXEL_WORST
+    Image.MAX_IMAGE_PIXELS = _PIXELS_LIMIT
     
     def __init__(self):
         """Initializes the ImgConverter instance."""
         self._img_array = self._ascii_array = self._font = self._scale = self._advanced_set = None
     
-    def _img_to_ascii(self, scale: int, advanced_set: bool, skip_rows: bool) -> None:
+    def _convert_to_grayscale(self, img: Image.Image):
+        """
+        Extracts green channel, and zero-out fully transparent pixels.
+        
+        Args:
+            img (PIL.Image.Image): Input pillow image.
+        
+        Returns:
+            np.ndarray: 2D array (H x W) of green-channel values, dtype uint8.
+        
+        Raises:
+            ImgConverterError: If `img` is not a pillow Image.
+        """
+        if not isinstance(img, Image.Image):
+            raise ImgConverterError("Image is not a pillow image")
+        
+        img_rgba = img.convert("RGBA")
+
+        rgba = np.asarray(img_rgba, dtype=np.uint8)
+
+        if rgba.ndim != 3 or rgba.shape[-1] != 4:
+            raise ValueError("Expected RGBA array of shape (H, W, 4)")
+
+        luma = np.dot(rgba[..., :3].astype(np.float32), [0.2126, 0.7152, 0.0722])
+
+        alpha = rgba[..., 3]
+        luma = np.where(alpha == 0, 255, luma)
+
+        return luma.astype(np.uint8)
+    
+    def _convert_to_ascii(self, scale: int, advanced_set: bool, skip_rows: bool) -> None:
         """
         Converts the loaded image to an ASCII representation.
         
@@ -72,7 +107,7 @@ class ImgConverter:
             arr = self._img_array[::2]
         else:
             arr = self._img_array
-            
+        
         h, w = arr.shape
         clamped_scale = max(0, min(scale, self._MAX_SCALE))
         block = 1 << clamped_scale
@@ -87,17 +122,17 @@ class ImgConverter:
         self._scale = scale
         self._advanced_set = advanced_set
     
-    def _is_supported_ext(self, file_path: PathLike) -> bool:
+    def _is_supported_format(self, format: str | None) -> bool:
         """
-        Check if the file has a supported extension.
+        Check if the file has a supported format.
 
         Args:
-            file_path (PathLike): Path to the file to check.
+            format (str | None): File format received from Image.format
 
         Returns:
-            bool: True if the file has a supported extension, False otherwise.
+            bool: True if the file has a supported format, False otherwise.
         """        
-        return file_path.suffix.lower() in self._SUPPORTED_EXT
+        return format is not None and str(format).lower() in self._SUPPORTED_FORMATS
     
     def load_from_file(self, img_path: str) -> None:
         """
@@ -113,19 +148,19 @@ class ImgConverter:
         if not isinstance(img_path, str):
             raise ValueError("img_path must be a string")
         
-        img_path = Path(img_path)
+        img_path = Path(img_path).expanduser().resolve()
         if not img_path.is_file():
             raise FileNotFoundError(f"{img_path} doesn't exist")
         
-        if not self._is_supported_ext(img_path):
-            raise UnsupportedExtensionError("Unsupported file extension")
-        
         with Image.open(img_path) as img:
-            self._img_array = np.asarray(img.convert("L"), dtype=np.uint8)   
+            if not self._is_supported_format(img.format):
+                raise UnsupportedExtensionError(f"Unsupported file format: {img.format}")
+            
+            self._img_array = self._convert_to_grayscale(img)   
         
         self._ascii_array = self._scale = self._advanced_set = None
         
-    def load_from_url(self, img_url: str) -> None:
+    def load_from_url(self, img_url: str, allow_redirects: bool = False) -> None:
         """
         Loads an image from a URL and converts it to ndarray.
         
@@ -144,17 +179,54 @@ class ImgConverter:
         if p.scheme not in ("http", "https") or not p.netloc:
             raise InvalidURLError(f"{img_url} is not a valid url")
         
-        if not self._is_supported_ext(PurePosixPath(p.path)):
-            raise UnsupportedExtensionError("Unsupported file extension")
-    
         try:
-            resp = requests.get(img_url, timeout=5)
+            head = requests.head(img_url, timeout=5, allow_redirects=allow_redirects)
+            head.raise_for_status()
+        except requests.RequestException as e:
+            raise ImageDownloadError(f"Failed to get header: {e}")
+
+        if head.is_redirect and not allow_redirects:
+            raise ImageDownloadError("Redirect blocked. Use --allow-redirect")
+
+        content_type = head.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            raise ImageDownloadError("Incorrect Content-Type in response")
+
+        content_length = head.headers.get("Content-Length", 0)
+        try:
+            content_length = int(content_length)
+        except ValueError as e:
+            raise ImageDownloadError("Incorrect Content-Length in response")
+        
+        if content_length and content_length > self._IMAGE_SIZE_LIMIT:
+            raise ImageDownloadError("Incorrect file size")
+        
+        buf = BytesIO()
+        try:
+            resp = requests.get(img_url, timeout=5, allow_redirects=allow_redirects, stream=True)
             resp.raise_for_status()
+            
+            for chunk in resp.iter_content(65536):
+                buf.write(chunk)
+                if buf.tell() > self._IMAGE_SIZE_LIMIT:
+                    raise ImageDownloadError("Image exceeds size limit")
+                
         except requests.RequestException as e:
             raise ImageDownloadError(f"Download failed: {e}")
         
-        with Image.open(BytesIO(resp.content)) as img:
-            self._img_array = np.asarray(img.convert("L"), dtype=np.uint8)    
+        buf.seek(0)
+        with Image.open(buf) as img:
+            try:
+                img.verify()
+            except (UnidentifiedImageError, DecompressionBombError) as e:
+                raise ImageDownloadError(f"Image verification failed: {e}")
+
+        buf.seek(0)
+        with Image.open(buf) as img:
+            if not self._is_supported_format(img.format):
+                raise UnsupportedExtensionError(f"Unsupported file format: {img.format}")
+            
+            self._img_array = self._convert_to_grayscale(img)    
         
         self._ascii_array = self._scale = self._advanced_set = None
     
@@ -174,7 +246,7 @@ class ImgConverter:
             ImageNotLoadedError: If no image is loaded.
         """
         if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set:
-            self._img_to_ascii(scale, advanced_set, skip_rows)
+            self._convert_to_ascii(scale, advanced_set, skip_rows)
     
         return self._ascii_array
 
@@ -194,7 +266,7 @@ class ImgConverter:
             ImageNotLoadedError: If no image is loaded.
         """
         if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set:
-            self._img_to_ascii(scale, advanced_set, skip_rows)
+            self._convert_to_ascii(scale, advanced_set, skip_rows)
     
         return "\n".join("".join(row) for row in self._ascii_array)
     
@@ -211,7 +283,7 @@ class ImgConverter:
             ImageNotLoadedError: If no image is loaded.
         """
         if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set:
-            self._img_to_ascii(scale, advanced_set, skip_rows)
+            self._convert_to_ascii(scale, advanced_set, skip_rows)
         
         print("\n".join("".join(row) for row in self._ascii_array))
     
@@ -238,11 +310,12 @@ class ImgConverter:
         self._get_font(font_size)
         
         if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set:
-            self._img_to_ascii(scale, advanced_set, skip_rows)
+            self._convert_to_ascii(scale, advanced_set, skip_rows)
         
-        out_path = Path(out_path)
-        if not self._is_supported_ext(out_path):
-            raise UnsupportedExtensionError("Unsupported file extension")
+        out_path = Path(out_path).expanduser().resolve()
+        out_format = out_path.suffix.lstrip(".")
+        if not self._is_supported_format(out_format):
+            raise UnsupportedExtensionError(f"Unsupported file format: {out_format}")
         
         if out_path.is_file() and not overwrite:
             raise TargetExistsError(f"Output file: {out_path} already exist.")
@@ -291,7 +364,6 @@ class ImgConverter:
         self._font = ImageFont.load_default()
         
 def main():
-    import sys
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -336,6 +408,13 @@ def main():
         default=False,
         help="overwrite existing output file"
     )
+    
+    parser.add_argument(
+        "--allow-redirects",
+        action="store_true",
+        default=False,
+        help="allow redirects when using image from url"
+    )
 
     args = parser.parse_args()
     conv = ImgConverter()
@@ -344,7 +423,7 @@ def main():
         if args.file:
             conv.load_from_file(args.file)
         else:
-            conv.load_from_url(args.url)
+            conv.load_from_url(args.url, allow_redirects=args.allow_redirects)
 
         if args.output:
             conv.save_to_img(
