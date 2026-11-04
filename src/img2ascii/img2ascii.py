@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from PIL.Image import DecompressionBombError
 from PIL import Image, ImageFont, ImageDraw, UnidentifiedImageError
+import math
 import os
 import sys
 
@@ -308,7 +309,7 @@ class ImgConverter:
         
         print("\n".join("".join(row) for row in self._ascii_array))
     
-    def save_to_img(self, out_path: str = "ascii.png", overwrite: bool = False, scale: int = 2, advanced_set: bool = False, font_size: int = 12, skip_rows: bool = False) -> None:
+    def save_to_img(self, out_path: str = "ascii.png", overwrite: bool = False, scale: int = 2, advanced_set: bool = False, font_size: int = 12, skip_rows: bool = True) -> None:
         """
         Saves the ASCII image as a grayscale image file.
         
@@ -318,7 +319,7 @@ class ImgConverter:
             scale (int): Determines the size of square blocks (2^scale x 2^scale) used to reduce image resolution.
             advanced_set (bool): Use advanced character set if True.
             font_size (int): Font size used to create image.
-            skip_rows (bool): If True, uses every second row of pixels, for better display in console.
+            skip_rows (bool): If True, uses every second row of pixels, to compensate for character cells being about twice as tall as wide.
             
         Raises:
             UnsupportedExtensionError: If the file extension is unsupported.
@@ -344,15 +345,16 @@ class ImgConverter:
         h = len(self._ascii_array)
         w = max(len(row) for row in self._ascii_array)
 
-        x0, y0, x1, y1 = self._font.getbbox("M")
-        cw, ch = x1 - x0, y1 - y0
+        ascent, descent = self._font.getmetrics()
+        cell_width = math.ceil(self._font.getlength("M"))
+        cell_height = ascent + descent
 
-        img = Image.new("L", (w*cw, h*ch), 255)
+        img = Image.new("L", (w*cell_width, h*cell_height), 255)
         draw = ImageDraw.Draw(img)
 
         for y, row in enumerate(self._ascii_array):
-            for x, ch_ in enumerate(row):
-                draw.text((x*cw, y*ch), ch_, font=self._font, fill=0)
+            for x, char in enumerate(row):
+                draw.text((x*cell_width, y*cell_height), char, font=self._font, fill=0)
 
         img.save(out_path)
     
@@ -453,7 +455,7 @@ def main():
                 scale=args.scale,
                 advanced_set=args.advanced,
                 font_size=args.font_size,
-                skip_rows=False
+                skip_rows=True
             )
             print(f"Saved to: {args.output}")
         else:
