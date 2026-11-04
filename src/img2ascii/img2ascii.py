@@ -47,7 +47,7 @@ class ImgConverter:
     
     def __init__(self):
         """Initializes the ImgConverter instance."""
-        self._img_array = self._ascii_array = self._font = self._scale = self._advanced_set = None
+        self._img_array = self._ascii_array = self._font = self._scale = self._advanced_set = self._skip_rows = None
     
     def _convert_to_grayscale(self, img: Image.Image):
         """
@@ -121,6 +121,7 @@ class ImgConverter:
         self._ascii_array = chars[(arr.astype(np.uint16) * (len(chars)-1) // 255)]
         self._scale = scale
         self._advanced_set = advanced_set
+        self._skip_rows = skip_rows
     
     def _is_supported_format(self, format: str | None) -> bool:
         """
@@ -158,7 +159,7 @@ class ImgConverter:
             
             self._img_array = self._convert_to_grayscale(img)   
         
-        self._ascii_array = self._scale = self._advanced_set = None
+        self._ascii_array = self._scale = self._advanced_set = self._skip_rows = None
         
     def load_from_url(self, img_url: str, allow_redirects: bool = False) -> None:
         """
@@ -228,7 +229,7 @@ class ImgConverter:
             
             self._img_array = self._convert_to_grayscale(img)    
         
-        self._ascii_array = self._scale = self._advanced_set = None
+        self._ascii_array = self._scale = self._advanced_set = self._skip_rows = None
     
     def get_array(self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = False) -> np.ndarray:
         """
@@ -245,7 +246,7 @@ class ImgConverter:
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set:
+        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows:
             self._convert_to_ascii(scale, advanced_set, skip_rows)
     
         return self._ascii_array
@@ -265,7 +266,7 @@ class ImgConverter:
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set:
+        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows:
             self._convert_to_ascii(scale, advanced_set, skip_rows)
     
         return "\n".join("".join(row) for row in self._ascii_array)
@@ -282,7 +283,7 @@ class ImgConverter:
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set:
+        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows:
             self._convert_to_ascii(scale, advanced_set, skip_rows)
         
         print("\n".join("".join(row) for row in self._ascii_array))
@@ -309,7 +310,7 @@ class ImgConverter:
         
         self._get_font(font_size)
         
-        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set:
+        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows:
             self._convert_to_ascii(scale, advanced_set, skip_rows)
         
         out_path = Path(out_path).expanduser().resolve()
