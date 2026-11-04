@@ -36,7 +36,7 @@ class ImgConverter:
                       "pgm", "pbm", "ico")
     _CHARSETS = {
         "simple": "@%#*+=-:. ",
-        "advanced": "@$B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvu "
+        "advanced": "@$B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvu"
                     "nxrjft/\\|()1}{][?-_+~i!lI;:,\"^`'. "
     }
     _MAX_SCALE = 6
