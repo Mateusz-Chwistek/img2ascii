@@ -60,12 +60,15 @@ class ImgConverter:
             np.ndarray: 2D array (H x W) of green-channel values, dtype uint8.
         
         Raises:
-            ImgConverterError: If `img` is not a pillow Image.
+            ImgConverterError: If `img` is not a pillow Image, or if its data cannot be decoded (wraps OSError).
         """
         if not isinstance(img, Image.Image):
             raise ImgConverterError("Image is not a pillow image")
-        
-        img_rgba = img.convert("RGBA")
+
+        try:
+            img_rgba = img.convert("RGBA")
+        except OSError as e:
+            raise ImgConverterError(f"Image decoding failed: {e}") from e
 
         rgba = np.asarray(img_rgba, dtype=np.uint8)
 
@@ -216,12 +219,12 @@ class ImgConverter:
             raise ImageDownloadError(f"Download failed: {e}")
         
         buf.seek(0)
-        with Image.open(buf) as img:
-            try:
+        try:
+            with Image.open(buf) as img:
                 img.verify()
-            except (UnidentifiedImageError, DecompressionBombError) as e:
-                raise ImageDownloadError(f"Image verification failed: {e}")
-
+        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError) as e:
+            raise ImageDownloadError(f"Image verification failed: {e}")
+        
         buf.seek(0)
         with Image.open(buf) as img:
             if not self._is_supported_format(img.format):
