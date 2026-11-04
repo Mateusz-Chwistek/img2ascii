@@ -37,6 +37,7 @@ class ImgConverter:
     _SUPPORTED_FORMATS = ("jpeg", "jpg", "png", "webp",
                       "tif", "tiff", "bmp", "ppm",
                       "pgm", "pbm", "ico")
+    _INPUT_FORMATS = ("JPEG", "PNG", "WEBP", "TIFF", "BMP", "PPM") # Pillow plugin IDs; ICO is left out because its plugin decodes pixels already in Image.open
     _CHARSETS = {
         "simple": "@%#*+=-:. ",
         "advanced": "@$B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvu"
@@ -46,8 +47,9 @@ class ImgConverter:
     _PIXELS_LIMIT = 8_847_360 # DCI-4K 4096x2160
     _BYTES_PER_PIXEL_WORST = 8 # 4 channels * 2 bytes
     _IMAGE_SIZE_LIMIT = _PIXELS_LIMIT * _BYTES_PER_PIXEL_WORST
-    Image.MAX_IMAGE_PIXELS = _PIXELS_LIMIT
-    
+    _JPEG_SIZE_LIMIT = 30 * 1024 * 1024 # Pillow's JPEG plugin uses ~60x the file size in memory on a file of empty markers
+    _JPEG_SIGNATURE = b"\xff\xd8\xff"
+
     def __init__(self):
         """Initializes the ImgConverter instance."""
         self._img_array = self._ascii_array = self._font = self._scale = self._advanced_set = self._skip_rows = None
@@ -140,7 +142,35 @@ class ImgConverter:
             bool: True if the file has a supported format, False otherwise.
         """        
         return format is not None and str(format).lower() in self._SUPPORTED_FORMATS
-    
+
+    def _check_pixel_limit(self, img: Image.Image) -> None:
+        """
+        Rejects an image with too many pixels, based on the size read from its header, before any pixels are decoded.
+
+        Args:
+            img (PIL.Image.Image): Opened pillow image.
+
+        Raises:
+            ImgConverterError: If the image exceeds the pixel limit.
+        """
+        if img.width * img.height > self._PIXELS_LIMIT:
+            raise ImgConverterError(f"Image exceeds pixel limit: {img.width}x{img.height}")
+
+    def _check_jpeg_size(self, signature: bytes, size: int) -> None:
+        """
+        Rejects an oversized JPEG. Must run before Image.open, which allocates memory for every JPEG marker it reads.
+        The file signature is used because Pillow detects the format by content, regardless of the file extension.
+
+        Args:
+            signature (bytes): First bytes of the image data.
+            size (int): Size of the image data in bytes.
+
+        Raises:
+            ImgConverterError: If the data is a JPEG that exceeds the JPEG size limit.
+        """
+        if signature.startswith(self._JPEG_SIGNATURE) and size > self._JPEG_SIZE_LIMIT:
+            raise ImgConverterError("JPEG exceeds size limit")
+
     def load_from_file(self, img_path: str) -> None:
         """
         Loads an image from a local file and converts it to ndarray.
@@ -162,22 +192,28 @@ class ImgConverter:
             raise FileNotFoundError(f"{img_path} doesn't exist")
 
         try:
-            if img_path.stat().st_size > self._IMAGE_SIZE_LIMIT:
+            file_size = img_path.stat().st_size
+            if file_size > self._IMAGE_SIZE_LIMIT:
                 raise ImgConverterError("Image exceeds size limit")
 
-            with Image.open(img_path) as img:
+            with img_path.open("rb") as file:
+                self._check_jpeg_size(file.read(len(self._JPEG_SIGNATURE)), file_size)
+
+            with Image.open(img_path, formats=self._INPUT_FORMATS) as img:
+                self._check_pixel_limit(img)
                 img.verify()
-        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError) as e:
+        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError, ValueError) as e:
             raise ImgConverterError(f"Image verification failed: {e}") from e
 
         # Unlike the in-memory buffer in load_from_url, the file can change or disappear between the two opens.
         try:
-            with Image.open(img_path) as img:
+            with Image.open(img_path, formats=self._INPUT_FORMATS) as img:
+                self._check_pixel_limit(img)
                 if not self._is_supported_format(img.format):
                     raise UnsupportedExtensionError(f"Unsupported file format: {img.format}")
 
                 self._img_array = self._convert_to_grayscale(img)
-        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError) as e:
+        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError, ValueError) as e:
             raise ImgConverterError(f"Image loading failed: {e}") from e
 
         self._ascii_array = self._scale = self._advanced_set = self._skip_rows = None
@@ -235,16 +271,19 @@ class ImgConverter:
                 
         except requests.RequestException as e:
             raise ImageDownloadError(f"Download failed: {e}")
-        
+
+        self._check_jpeg_size(buf.getbuffer()[:len(self._JPEG_SIGNATURE)].tobytes(), buf.tell())
+
         buf.seek(0)
         try:
-            with Image.open(buf) as img:
+            with Image.open(buf, formats=self._INPUT_FORMATS) as img:
+                self._check_pixel_limit(img)
                 img.verify()
-        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError) as e:
+        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError, ValueError) as e:
             raise ImageDownloadError(f"Image verification failed: {e}")
-        
+
         buf.seek(0)
-        with Image.open(buf) as img:
+        with Image.open(buf, formats=self._INPUT_FORMATS) as img:
             if not self._is_supported_format(img.format):
                 raise UnsupportedExtensionError(f"Unsupported file format: {img.format}")
             
