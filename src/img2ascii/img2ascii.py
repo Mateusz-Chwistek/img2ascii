@@ -146,22 +146,37 @@ class ImgConverter:
             img_path (str): Path to the image file.
         
         Raises:
+            TypeError: If `img_path` is not a string.
             FileNotFoundError: If the file does not exist.
             UnsupportedExtensionError: If the file extension is not supported.
+            ImgConverterError: If the file cannot be read, is not a valid image or exceeds the size or pixel limit.
         """
         if not isinstance(img_path, str):
-            raise ValueError("img_path must be a string")
-        
+            raise TypeError("img_path must be a string")
+
         img_path = Path(img_path).expanduser().resolve()
         if not img_path.is_file():
             raise FileNotFoundError(f"{img_path} doesn't exist")
-        
-        with Image.open(img_path) as img:
-            if not self._is_supported_format(img.format):
-                raise UnsupportedExtensionError(f"Unsupported file format: {img.format}")
-            
-            self._img_array = self._convert_to_grayscale(img)   
-        
+
+        try:
+            if img_path.stat().st_size > self._IMAGE_SIZE_LIMIT:
+                raise ImgConverterError("Image exceeds size limit")
+
+            with Image.open(img_path) as img:
+                img.verify()
+        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError) as e:
+            raise ImgConverterError(f"Image verification failed: {e}") from e
+
+        # Unlike the in-memory buffer in load_from_url, the file can change or disappear between the two opens.
+        try:
+            with Image.open(img_path) as img:
+                if not self._is_supported_format(img.format):
+                    raise UnsupportedExtensionError(f"Unsupported file format: {img.format}")
+
+                self._img_array = self._convert_to_grayscale(img)
+        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError) as e:
+            raise ImgConverterError(f"Image loading failed: {e}") from e
+
         self._ascii_array = self._scale = self._advanced_set = self._skip_rows = None
         
     def load_from_url(self, img_url: str, allow_redirects: bool = False) -> None:
@@ -177,7 +192,7 @@ class ImgConverter:
             ImageDownloadError: If the image could not be downloaded.
         """
         if not isinstance(img_url, str):
-            raise ValueError("img_url must be a string")
+            raise TypeError("img_url must be a string")
         
         p = urlparse(img_url)
         if p.scheme not in ("http", "https") or not p.netloc:
