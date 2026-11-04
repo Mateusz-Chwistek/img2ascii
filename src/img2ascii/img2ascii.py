@@ -5,6 +5,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 from PIL.Image import DecompressionBombError
 from PIL import Image, ImageFont, ImageDraw, UnidentifiedImageError
+import os
+import sys
 
 class ImgConverterError(Exception):
     """Base ImgConverter exception"""
@@ -460,6 +462,14 @@ def main():
                 advanced_set=args.advanced,
                 skip_rows=True
             )
-    except ImgConverterError as exc:
-        parser.error(str(exc))
+
+        # Force buffered output out here, so a closed pipe is reported inside this try and not at interpreter exit.
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Python flushes stdout again on exit, which would raise a second time on the closed pipe.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(1)
+    except (ImgConverterError, OSError, ValueError, RuntimeError) as e:
+        print(f"{parser.prog}: error: {e}", file=sys.stderr)
+        sys.exit(1)
     
