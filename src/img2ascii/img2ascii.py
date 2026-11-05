@@ -69,6 +69,7 @@ class ImgConverter:
     _SUPPORTED_FORMATS: Final[tuple[str, ...]] = (
         "jpeg",
         "jpg",
+        "mpo",
         "png",
         "webp",
         "tif",
@@ -183,7 +184,7 @@ class ImgConverter:
         try:
             rgba_image: Image.Image = image.convert("RGBA")
         except OSError as error:
-            raise ImgConverterError(f"Image decoding failed: {error}") from error
+            raise ImgConverterError(f"image decoding failed: {error}") from error
 
         rgba: npt.NDArray[np.float32] = np.asarray(rgba_image, dtype=np.float32)
 
@@ -355,7 +356,7 @@ class ImgConverter:
             raise TypeError("invert must be a boolean")
 
         if self._img_array is None:
-            raise ImageNotLoadedError("Load image first")
+            raise ImageNotLoadedError("no image loaded, load one first")
 
         clamped_scale: int = self._clamp_scale(scale)
         if clamped_scale != scale:
@@ -373,7 +374,14 @@ class ImgConverter:
 
         :return: The ASCII art with a newline between rows.
         :rtype: str
+
+        :raises ValueError: When the image is smaller than one block and the
+            result is empty.
         """
+
+        # An image smaller than one block gives no rows or no columns.
+        if self._ascii_array.size == 0:
+            raise ValueError("image is too small for this scale, the result is empty")
 
         return "\n".join("".join(row) for row in self._ascii_array)
 
@@ -443,7 +451,8 @@ class ImgConverter:
         # The size comes from the header, so this runs before any pixels are decoded.
         if image.width * image.height > self._PIXELS_LIMIT:
             raise ImgConverterError(
-                f"Image exceeds pixel limit: {image.width}x{image.height}"
+                f"image exceeds the pixel limit of {self._PIXELS_LIMIT:,} px "
+                f"({image.width}x{image.height})"
             )
 
     def _check_jpeg_size(self, signature: bytes, size: int) -> None:
@@ -463,7 +472,10 @@ class ImgConverter:
         # it reads. The signature is checked because Pillow detects the format by
         # content, regardless of the file extension.
         if signature.startswith(self._JPEG_SIGNATURE) and size > self._JPEG_SIZE_LIMIT:
-            raise ImgConverterError("JPEG exceeds size limit")
+            raise ImgConverterError(
+                f"JPEG exceeds the size limit of {self._JPEG_SIZE_LIMIT:,} bytes "
+                f"({size:,} bytes)"
+            )
 
     def load_from_file(self, img_path: str | os.PathLike[str]) -> None:
         """
@@ -488,12 +500,15 @@ class ImgConverter:
 
         image_path: Path = Path(img_path).expanduser().resolve()
         if not image_path.is_file():
-            raise FileNotFoundError(f"{image_path} doesn't exist")
+            raise FileNotFoundError(f"file not found: {image_path}")
 
         try:
             file_size: int = image_path.stat().st_size
             if file_size > self._IMAGE_SIZE_LIMIT:
-                raise ImgConverterError("Image exceeds size limit")
+                raise ImgConverterError(
+                    f"image exceeds the size limit of {self._IMAGE_SIZE_LIMIT:,} bytes "
+                    f"({file_size:,} bytes)"
+                )
 
             with image_path.open("rb") as file:
                 self._check_jpeg_size(file.read(len(self._JPEG_SIGNATURE)), file_size)
@@ -508,7 +523,7 @@ class ImgConverter:
             OSError,
             ValueError,
         ) as error:
-            raise ImgConverterError(f"Image verification failed: {error}") from error
+            raise ImgConverterError(f"image verification failed: {error}") from error
 
         # Unlike the in-memory buffer in load_from_url, the file can change or
         # disappear between the two opens.
@@ -517,7 +532,7 @@ class ImgConverter:
                 self._check_pixel_limit(image)
                 if not self._is_supported_format(image.format):
                     raise UnsupportedExtensionError(
-                        f"Unsupported file format: {image.format}"
+                        f"unsupported image format: {image.format}"
                     )
 
                 self._img_array = self._convert_to_grayscale(image)
@@ -528,7 +543,7 @@ class ImgConverter:
             OSError,
             ValueError,
         ) as error:
-            raise ImgConverterError(f"Image loading failed: {error}") from error
+            raise ImgConverterError(f"image loading failed: {error}") from error
 
         self._clear_cache()
 
@@ -536,6 +551,9 @@ class ImgConverter:
         """
         Download an image over http or https, check its size and verify it
         before decoding the pixels.
+
+        Proxy and CA bundle environment variables are honoured, credentials
+        from ~/.netrc are never sent.
 
         :param img_url: The URL of the image.
         :type img_url: str
@@ -564,40 +582,64 @@ class ImgConverter:
         try:
             parsed_url: ParseResult = urlparse(img_url)
         except ValueError as error:
-            raise InvalidURLError(f"{img_url} is not a valid url") from error
+            raise InvalidURLError(f"invalid URL: {img_url}") from error
 
         if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
-            raise InvalidURLError(f"{img_url} is not a valid url")
+            raise InvalidURLError(f"invalid URL: {img_url}")
+
+        # With trust_env on, requests silently adds credentials from ~/.netrc
+        # for a matching host. Turning it off also drops the proxy and CA bundle
+        # environment variables, so those are read here the way requests does
+        # and passed on explicitly.
+        proxies: dict[str, str] = requests.utils.get_environ_proxies(img_url)
+        verify: str | bool = (
+            os.environ.get("REQUESTS_CA_BUNDLE")
+            or os.environ.get("CURL_CA_BUNDLE")
+            or True
+        )
+        session: requests.Session = requests.Session()
+        session.trust_env = False
 
         buffer: BytesIO = BytesIO()
         # Deadline set before the request so connect and header time count too
         deadline: float = time.monotonic() + self._DOWNLOAD_TIMEOUT
         try:
-            with requests.get(
-                img_url,
-                timeout=self._DOWNLOAD_TIMEOUT,
-                allow_redirects=allow_redirects,
-                stream=True,
-            ) as response:
+            with (
+                session,
+                session.get(
+                    img_url,
+                    timeout=self._DOWNLOAD_TIMEOUT,
+                    allow_redirects=allow_redirects,
+                    stream=True,
+                    proxies=proxies,
+                    verify=verify,
+                ) as response,
+            ):
                 response.raise_for_status()
 
                 if response.is_redirect and not allow_redirects:
-                    raise ImageDownloadError("Redirect blocked. Use --allow-redirects")
+                    raise ImageDownloadError("redirect blocked, allow_redirects is off")
 
                 content_type: str = response.headers.get("Content-Type", "")
                 if not content_type.startswith("image/"):
-                    raise ImageDownloadError("Incorrect Content-Type in response")
+                    raise ImageDownloadError(
+                        "response is not an image, Content-Type: "
+                        f"{content_type or 'missing'}"
+                    )
 
                 content_length_header: str = response.headers.get("Content-Length", "0")
                 try:
                     content_length: int = int(content_length_header)
                 except ValueError as error:
                     raise ImageDownloadError(
-                        "Incorrect Content-Length in response"
+                        f"invalid Content-Length in response: {content_length_header}"
                     ) from error
 
                 if content_length and content_length > self._IMAGE_SIZE_LIMIT:
-                    raise ImageDownloadError("Incorrect file size")
+                    raise ImageDownloadError(
+                        f"image exceeds the size limit of "
+                        f"{self._IMAGE_SIZE_LIMIT:,} bytes ({content_length:,} bytes)"
+                    )
 
                 # iter_content blocks until a whole chunk arrives, so a server sending
                 # one byte at a time would never reach the deadline check. read1
@@ -607,13 +649,18 @@ class ImgConverter:
                 while chunk := response.raw.read1(65536, decode_content=True):
                     buffer.write(chunk)
                     if buffer.tell() > self._IMAGE_SIZE_LIMIT:
-                        raise ImageDownloadError("Image exceeds size limit")
+                        raise ImageDownloadError(
+                            f"image exceeds the size limit of "
+                            f"{self._IMAGE_SIZE_LIMIT:,} bytes"
+                        )
                     if time.monotonic() > deadline:
-                        raise ImageDownloadError("Download took too long")
+                        raise ImageDownloadError(
+                            f"download took longer than {self._DOWNLOAD_TIMEOUT} s"
+                        )
 
         # Errors while reading response.raw come from urllib3, not wrapped by requests.
         except (requests.RequestException, urllib3.exceptions.HTTPError) as error:
-            raise ImageDownloadError(f"Download failed: {error}") from error
+            raise ImageDownloadError(f"download failed: {error}") from error
 
         self._check_jpeg_size(
             buffer.getbuffer()[: len(self._JPEG_SIGNATURE)].tobytes(), buffer.tell()
@@ -631,13 +678,13 @@ class ImgConverter:
             OSError,
             ValueError,
         ) as error:
-            raise ImageDownloadError(f"Image verification failed: {error}") from error
+            raise ImageDownloadError(f"image verification failed: {error}") from error
 
         buffer.seek(0)
         with Image.open(buffer, formats=self._INPUT_FORMATS) as image:
             if not self._is_supported_format(image.format):
                 raise UnsupportedExtensionError(
-                    f"Unsupported file format: {image.format}"
+                    f"unsupported image format: {image.format}"
                 )
 
             self._img_array = self._convert_to_grayscale(image)
@@ -716,6 +763,8 @@ class ImgConverter:
 
         :raises TypeError: When an argument has the wrong type.
         :raises ImageNotLoadedError: When no image is loaded yet.
+        :raises ValueError: When the image is smaller than one block and
+            the result is empty.
         """
 
         self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
@@ -753,6 +802,8 @@ class ImgConverter:
 
         :raises TypeError: When an argument has the wrong type.
         :raises ImageNotLoadedError: When no image is loaded yet.
+        :raises ValueError: When the image is smaller than one block and
+            the result is empty.
         :raises OSError: When stdout cannot be written, e.g. a closed pipe.
         """
 
@@ -792,7 +843,8 @@ class ImgConverter:
         :param advanced_set: Use the larger, more detailed character set.
         :type advanced_set: bool
 
-        :param font_size: Font size in pixels of the rendered text.
+        :param font_size: Font size in pixels of the rendered text, ignored
+            when no monospaced system font is found.
         :type font_size: int
 
         :param skip_rows: Average each pair of rows before converting, which
@@ -837,16 +889,30 @@ class ImgConverter:
         output_path: Path = Path(out_path).expanduser().resolve()
         out_format: str = output_path.suffix.lstrip(".")
         if not self._is_supported_format(out_format):
-            raise UnsupportedExtensionError(f"Unsupported file format: {out_format}")
+            raise UnsupportedExtensionError(
+                f"unsupported output format: {out_format or '(no extension)'}"
+            )
 
         if output_path.is_file() and not overwrite:
-            raise TargetExistsError(f"Output file: {output_path} already exists.")
+            raise TargetExistsError(f"output file already exists: {output_path}")
+
+        # An image smaller than one block gives no rows or no columns, and an
+        # empty canvas cannot be saved.
+        if self._ascii_array.size == 0:
+            raise ValueError("image is too small for this scale, the result is empty")
 
         lines: list[str] = ["".join(row) for row in self._ascii_array]
 
-        # Line height is ascent (above the baseline) plus descent (below it), so
-        # characters with tails like "p" or "g" do not reach into the next line.
-        line_height: int = sum(self._font.getmetrics())
+        line_height: int
+        if isinstance(self._font, ImageFont.FreeTypeFont):
+            # Line height is ascent (above the baseline) plus descent (below it),
+            # so characters with tails like "p" or "g" do not reach into the
+            # next line.
+            line_height = sum(self._font.getmetrics())
+        else:
+            # The bitmap fallback font has no metrics, but every glyph box is
+            # the full cell height.
+            line_height = self._font.getbbox(" ")[3]
         width: int = math.ceil(max(self._font.getlength(line) for line in lines))
 
         # White background, the text is drawn in black.
@@ -864,18 +930,22 @@ class ImgConverter:
     def _get_font(self, font_size: int = 12) -> None:
         """
         Load the first monospaced font available on the system, falling back
-        to Pillow's built-in font.
+        to Pillow's built-in bitmap font, which has a single fixed size.
 
         :param font_size: Font size in pixels.
         :type font_size: int
         """
 
         # Common monospaced fonts on Windows, Linux and macOS, tried in order.
+        # Pillow looks fonts up by file name, and Windows names the files
+        # differently from the font (cour.ttf is Courier New).
         font_names: list[str] = [
+            "cour.ttf",
             "Courier New.ttf",
             "DejaVuSansMono.ttf",
             "LiberationMono-Regular.ttf",
             "Menlo.ttc",
+            "consola.ttf",
             "Consolas.ttf",
         ]
 
@@ -887,4 +957,7 @@ class ImgConverter:
             except OSError:
                 continue
 
-        self._font = ImageFont.load_default(size=font_size)
+        # load_default returns a proportional font, which would misalign the
+        # columns, so the older bitmap font is used even though it ignores
+        # font_size.
+        self._font = ImageFont.load_default_imagefont()
