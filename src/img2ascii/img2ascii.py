@@ -224,6 +224,15 @@ class ImgConverter:
                 stacklevel=3,
             )
 
+    def _ascii_to_string(self) -> str:
+        """
+        Joins the cached ASCII array into a single string, one line per row.
+
+        Returns:
+            str: ASCII image as a string of characters.
+        """
+        return "\n".join("".join(row) for row in self._ascii_array)
+
     def _needs_conversion(
         self, scale: int, advanced_set: bool, skip_rows: bool
     ) -> bool:
@@ -495,7 +504,7 @@ class ImgConverter:
         if self._needs_conversion(scale, advanced_set, skip_rows):
             self._convert_to_ascii(scale, advanced_set, skip_rows)
 
-        return "\n".join("".join(row) for row in self._ascii_array)
+        return self._ascii_to_string()
 
     def print_ascii(
         self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True
@@ -516,7 +525,7 @@ class ImgConverter:
         if self._needs_conversion(scale, advanced_set, skip_rows):
             self._convert_to_ascii(scale, advanced_set, skip_rows)
 
-        print("\n".join("".join(row) for row in self._ascii_array))
+        print(self._ascii_to_string())
 
     def save_to_img(
         self,
