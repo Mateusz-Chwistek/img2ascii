@@ -75,6 +75,11 @@ class ImgConverter:
     _DOWNLOAD_TIMEOUT = (
         15  # Seconds; limit for the whole download and for a single socket read
     )
+    _SRGB_TO_LINEAR = np.where(
+        np.arange(256) / 255 <= 0.04045,
+        np.arange(256) / 255 / 12.92,
+        ((np.arange(256) / 255 + 0.055) / 1.055) ** 2.4,
+    ).astype(np.float32)  # Lookup table from an 8-bit sRGB value to linear light 0-1
 
     def __init__(self):
         """Initializes the ImgConverter instance."""
@@ -100,14 +105,16 @@ class ImgConverter:
         except OSError as e:
             raise ImgConverterError(f"Image decoding failed: {e}") from e
 
-        rgba = np.asarray(img_rgba, dtype=np.uint8)
+        rgba = np.asarray(img_rgba, dtype=np.float32)
 
-        luma = np.dot(rgba[..., :3].astype(np.float32), [0.2126, 0.7152, 0.0722])
+        luma = rgba[..., :3] @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
-        alpha = rgba[..., 3]
-        luma = np.where(alpha == 0, 255, luma)
+        # Composite on a white background, so semi-transparent edges blend in
+        # instead of being drawn as fully opaque.
+        alpha = rgba[..., 3] / 255
+        luma = luma * alpha + 255 * (1 - alpha)
 
-        return luma.astype(np.uint8)
+        return np.round(luma).astype(np.uint8)
 
     def _convert_to_ascii(
         self, scale: int, advanced_set: bool, skip_rows: bool
@@ -125,29 +132,49 @@ class ImgConverter:
         )
         chars = np.asarray(list(charset), dtype="<U1")
 
-        if skip_rows:
-            arr = self._img_array[::2]
-        else:
-            arr = self._img_array
+        # Averaging is done in linear light; averaging sRGB values directly
+        # darkens high-contrast areas.
+        linear = self._SRGB_TO_LINEAR[self._img_array]
 
-        h, w = arr.shape
+        if skip_rows:
+            # Average each pair of rows instead of dropping every second one,
+            # so thin horizontal lines do not disappear.
+            height = linear.shape[0] - linear.shape[0] % 2
+            linear = linear[:height].reshape(height // 2, 2, -1).mean(axis=1)
+
+        h, w = linear.shape
         clamped_scale = self._clamp_scale(scale)
         block = 1 << clamped_scale
         h -= h % block
         w -= w % block
-        arr = arr[:h, :w]
+        linear = linear[:h, :w]
 
         if block > 1:
-            arr = (
-                arr.reshape(h // block, block, w // block, block)
-                .mean((1, 3))
-                .astype(np.uint8)
-            )
+            linear = linear.reshape(h // block, block, w // block, block).mean((1, 3))
 
-        self._ascii_array = chars[(arr.astype(np.uint16) * (len(chars) - 1) // 255)]
+        srgb = self._linear_to_srgb(linear)
+        # Equal-width brightness buckets: each character covers 256 / len(chars) values.
+        self._ascii_array = chars[srgb.astype(np.uint16) * len(chars) // 256]
         self._scale = clamped_scale
         self._advanced_set = advanced_set
         self._skip_rows = skip_rows
+
+    def _linear_to_srgb(self, linear: np.ndarray) -> np.ndarray:
+        """
+        Converts linear light values back to 8-bit sRGB.
+
+        Args:
+            linear (np.ndarray): Linear light values in range 0-1.
+
+        Returns:
+            np.ndarray: sRGB values, dtype uint8.
+        """
+        srgb = np.where(
+            linear <= 0.0031308,
+            linear * 12.92,
+            1.055 * np.power(linear, 1 / 2.4) - 0.055,
+        )
+        return np.round(srgb * 255).astype(np.uint8)
 
     def _clamp_scale(self, scale: int) -> int:
         """
@@ -544,21 +571,18 @@ class ImgConverter:
         if out_path.is_file() and not overwrite:
             raise TargetExistsError(f"Output file: {out_path} already exists.")
 
-        h = len(self._ascii_array)
-        w = max(len(row) for row in self._ascii_array)
+        lines = ["".join(row) for row in self._ascii_array]
 
         ascent, descent = self._font.getmetrics()
-        cell_width = math.ceil(self._font.getlength("M"))
-        cell_height = ascent + descent
+        line_height = ascent + descent
+        width = math.ceil(max(self._font.getlength(line) for line in lines))
 
-        img = Image.new("L", (w * cell_width, h * cell_height), 255)
+        img = Image.new("L", (width, len(lines) * line_height), 255)
         draw = ImageDraw.Draw(img)
 
-        for y, row in enumerate(self._ascii_array):
-            for x, char in enumerate(row):
-                draw.text(
-                    (x * cell_width, y * cell_height), char, font=self._font, fill=0
-                )
+        # One call per row: the font's own advance spaces the characters.
+        for y, line in enumerate(lines):
+            draw.text((0, y * line_height), line, font=self._font, fill=0)
 
         img.save(out_path)
 
