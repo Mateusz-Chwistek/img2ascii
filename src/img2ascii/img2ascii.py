@@ -216,17 +216,19 @@ class ImgConverter:
             or skip_rows != self._skip_rows
         )
 
-    def _is_supported_format(self, format: str | None) -> bool:
+    def _is_supported_format(self, image_format: str | None) -> bool:
         """
         Check if the file has a supported format.
 
         Args:
-            format (str | None): File format received from Image.format
+            image_format (str | None): File format received from Image.format
 
         Returns:
             bool: True if the file has a supported format, False otherwise.
         """
-        return format is not None and format.lower() in self._SUPPORTED_FORMATS
+        return (
+            image_format is not None and image_format.lower() in self._SUPPORTED_FORMATS
+        )
 
     def _check_pixel_limit(self, img: Image.Image) -> None:
         """
@@ -523,7 +525,7 @@ class ImgConverter:
             raise UnsupportedExtensionError(f"Unsupported file format: {out_format}")
 
         if out_path.is_file() and not overwrite:
-            raise TargetExistsError(f"Output file: {out_path} already exist.")
+            raise TargetExistsError(f"Output file: {out_path} already exists.")
 
         h = len(self._ascii_array)
         w = max(len(row) for row in self._ascii_array)
