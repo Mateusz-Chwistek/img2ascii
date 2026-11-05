@@ -6,6 +6,15 @@ from .img2ascii import ImgConverter, ImgConverterError
 
 
 def main() -> None:
+    """
+    Parse the command line arguments, load the image from a file or a URL and
+    print the ASCII art or save it to an image file.
+
+    On a conversion, file or network error, a message goes to stderr and the
+    process exits with code 1. Invalid arguments are reported by argparse,
+    which exits with code 2.
+    """
+
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
         prog="img2ascii",
         description="Converts an image to ASCII art (print or save to file).",
@@ -68,11 +77,15 @@ def main() -> None:
         "--invert",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="invert brightness for light text on a dark background; on by default when printing to the terminal, off when saving to an image",
+        help=(
+            "invert brightness for light text on a dark background; on by default "
+            "when printing to the terminal, off when saving to an image"
+        ),
     )
 
     args: argparse.Namespace = parser.parse_args()
-    # A dark terminal needs inverted brightness, a saved image (black text on white) does not.
+    # A dark terminal needs inverted brightness, a saved image (black text on
+    # white) does not.
     invert: bool = args.invert if args.invert is not None else not args.output
     converter: ImgConverter = ImgConverter()
 
@@ -101,10 +114,12 @@ def main() -> None:
                 invert=invert,
             )
 
-        # Force buffered output out here, so a closed pipe is reported inside this try and not at interpreter exit.
+        # Force buffered output out here, so a closed pipe is reported inside
+        # this try and not at interpreter exit.
         sys.stdout.flush()
     except BrokenPipeError:
-        # Python flushes stdout again on exit, which would raise a second time on the closed pipe.
+        # Python flushes stdout again on exit, which would raise a second time
+        # on the closed pipe.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         sys.exit(1)
     except (ImgConverterError, OSError, ValueError, RuntimeError) as error:

@@ -16,30 +16,56 @@ from PIL.Image import DecompressionBombError
 
 
 class ImgConverterError(Exception):
-    pass
+    """
+    Base class for this package's own exceptions.
+    """
 
 
 class ImageNotLoadedError(ImgConverterError):
-    pass
+    """
+    Error raised when a conversion is requested before an image is loaded.
+    """
 
 
 class InvalidURLError(ImgConverterError):
-    pass
+    """
+    Error raised when a URL is not a plain http or https address.
+    """
 
 
 class UnsupportedExtensionError(ImgConverterError):
-    pass
+    """
+    Error raised when an image or an output file uses a format outside the
+    supported list.
+    """
 
 
 class ImageDownloadError(ImgConverterError):
-    pass
+    """
+    Error raised when an image cannot be downloaded or fails the download
+    checks.
+    """
 
 
 class TargetExistsError(ImgConverterError):
-    pass
+    """
+    Error raised when the output file already exists and overwrite is off.
+    """
 
 
 class ImgConverter:
+    """
+    Converter from a loaded image to ASCII art. The result is cached and
+    rebuilt only when the arguments change.
+
+    Load an image with ``load_from_file`` or ``load_from_url`` before calling
+    the conversion methods.
+    """
+
+    #################### Formats ####################
+
+    # Formats accepted after loading (Pillow format IDs, lower case) and output
+    # file extensions
     _SUPPORTED_FORMATS: Final[tuple[str, ...]] = (
         "jpeg",
         "jpg",
@@ -53,7 +79,9 @@ class ImgConverter:
         "pbm",
         "ico",
     )
-    # Pillow plugin IDs; ICO is left out because its plugin decodes pixels already in Image.open
+
+    # Pillow plugin IDs, ICO is left out because its plugin decodes the pixels
+    # already in Image.open
     _INPUT_FORMATS: Final[tuple[str, ...]] = (
         "JPEG",
         "PNG",
@@ -62,21 +90,45 @@ class ImgConverter:
         "BMP",
         "PPM",
     )
+
+    #################### Character sets ####################
+
     # Both sets go from the densest character (dark pixel) to a space (light pixel)
     _CHARSETS: Final[dict[str, str]] = {
         "simple": "@%#*+=-:. ",
         "advanced": "@$B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvu"
         "nxrjft/\\|()1}{][?-_+~i!lI;:,\"^`'. ",
     }
+
+    #################### Limits ####################
+
+    # Largest allowed scale, one character averages a 2 ** scale x 2 ** scale
+    # pixel block
     MAX_SCALE: Final[int] = 6
-    _PIXELS_LIMIT: Final[int] = 8_847_360  # DCI-4K 4096x2160
-    _BYTES_PER_PIXEL_WORST: Final[int] = 8  # 4 channels * 2 bytes
+
+    # Maximum total pixel count of the decoded image, DCI-4K 4096x2160
+    _PIXELS_LIMIT: Final[int] = 8_847_360
+
+    # Bytes per pixel in the worst case, 4 channels * 2 bytes
+    _BYTES_PER_PIXEL_WORST: Final[int] = 8
+
+    # Bytes, the maximum image size accepted from a file or a download
     _IMAGE_SIZE_LIMIT: Final[int] = _PIXELS_LIMIT * _BYTES_PER_PIXEL_WORST
-    # Pillow's JPEG plugin uses ~60x the file size in memory on a file of empty markers
+
+    # Bytes, maximum JPEG size; Pillow's JPEG plugin can use ~60x the file size
+    # in memory on a file of empty markers
     _JPEG_SIZE_LIMIT: Final[int] = 30 * 1024 * 1024
+
+    # Magic bytes at the start of every JPEG file, checked before Pillow opens it
     _JPEG_SIGNATURE: Final[bytes] = b"\xff\xd8\xff"
-    # Seconds; limit for the whole download and for a single socket read
+
+    #################### Download ####################
+
+    # Seconds, limit for the whole download and for a single socket read
     _DOWNLOAD_TIMEOUT: Final[int] = 15
+
+    #################### Color ####################
+
     # Lookup table from an 8-bit sRGB value to linear light 0-1, using the sRGB
     # transfer function: a linear segment near black, a 2.4 power curve above it.
     _SRGB_TO_LINEAR: Final[npt.NDArray[np.float32]] = np.where(
@@ -86,8 +138,14 @@ class ImgConverter:
     ).astype(np.float32)
 
     def __init__(self) -> None:
+        """
+        Create an empty converter. Load an image with ``load_from_file`` or
+        ``load_from_url`` before converting.
+        """
+
         self._img_array: npt.NDArray[np.uint8] | None = None
         self._font: ImageFont.FreeTypeFont | ImageFont.ImageFont | None = None
+
         # Cached ASCII result and the arguments it was made with
         self._ascii_array: npt.NDArray[np.str_] | None = None
         self._scale: int | None = None
@@ -96,6 +154,11 @@ class ImgConverter:
         self._invert: bool | None = None
 
     def _clear_cache(self) -> None:
+        """
+        Drop the cached ASCII result and the arguments it was made with.
+        Called after every image load, so a stale result is never returned.
+        """
+
         self._ascii_array = None
         self._scale = None
         self._advanced_set = None
@@ -103,7 +166,20 @@ class ImgConverter:
         self._invert = None
 
     def _convert_to_grayscale(self, image: Image.Image) -> npt.NDArray[np.uint8]:
-        # 1. Decode the image into RGBA, so every input mode has the same 4 channels.
+        """
+        Decode an image into a 2-D array of 0-255 brightness values.
+
+        :param image: The image to decode, in any mode Pillow supports.
+        :type image: Image.Image
+
+        :return: One brightness value per pixel, one row per image row.
+        :rtype: npt.NDArray[np.uint8]
+
+        :raises ImgConverterError: When Pillow cannot decode the image.
+        """
+
+        # Step 1: Decode the image into RGBA, so every input mode has the same
+        # 4 channels.
         try:
             rgba_image: Image.Image = image.convert("RGBA")
         except OSError as error:
@@ -111,50 +187,68 @@ class ImgConverter:
 
         rgba: npt.NDArray[np.float32] = np.asarray(rgba_image, dtype=np.float32)
 
-        # 2. Brightness (luma) as a weighted sum of R, G and B with Rec. 709
+        # Step 2: Brightness (luma) as a weighted sum of R, G and B with Rec. 709
         # weights; green counts most because the eye is most sensitive to it.
         luma: npt.NDArray[np.float32] = rgba[..., :3] @ np.array(
             [0.2126, 0.7152, 0.0722], dtype=np.float32
         )
 
-        # 3. Composite on a white background, so semi-transparent edges blend in
+        # Step 3: Composite on a white background, so semi-transparent edges blend in
         # instead of being drawn as fully opaque: alpha 1 keeps the pixel,
         # alpha 0 gives white (255), values in between mix the two.
         alpha: npt.NDArray[np.float32] = rgba[..., 3] / 255
         luma = luma * alpha + 255 * (1 - alpha)
 
-        # 4. Round (not truncate) to whole 0-255 values.
+        # Step 4: Round (not truncate) to whole 0-255 values.
         return np.round(luma).astype(np.uint8)
 
     def _convert_to_ascii(
         self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
     ) -> None:
-        # 1. Character set as an array, so a whole array of indices can be
+        """
+        Rebuild the cached ASCII art from the loaded image, one block of
+        2 ** scale x 2 ** scale pixels per character.
+
+        :param scale: Logarithmic scale, clamped to 0-MAX_SCALE here.
+        :type scale: int
+
+        :param advanced_set: Use the larger, more detailed character set.
+        :type advanced_set: bool
+
+        :param skip_rows: Average each pair of rows before converting, which
+            halves the output height.
+        :type skip_rows: bool
+
+        :param invert: Flip brightness, for light text on a dark background.
+        :type invert: bool
+        """
+
+        # Step 1: Character set as an array, so a whole array of indices can be
         # turned into characters in one step at the end.
         charset: str = (
             self._CHARSETS["advanced"] if advanced_set else self._CHARSETS["simple"]
         )
         chars: npt.NDArray[np.str_] = np.asarray(list(charset), dtype="<U1")
 
-        # 2. Optional inversion: bright pixels get dense characters, which suits
+        # Step 2: Optional inversion: bright pixels get dense characters, which suits
         # light text on a dark background, e.g. a dark terminal.
         gray: npt.NDArray[np.uint8] = (
             255 - self._img_array if invert else self._img_array
         )
 
-        # 3. sRGB values to linear light through the lookup table. All averaging
-        # below is done in linear light; averaging sRGB values directly darkens
+        # Step 3: sRGB values to linear light through the lookup table. All averaging
+        # below is done in linear light, averaging sRGB values directly darkens
         # high-contrast areas.
         linear: npt.NDArray[np.float32] = self._SRGB_TO_LINEAR[gray]
 
-        # 4. Optional row halving: average each pair of rows instead of dropping
+        # Step 4: Optional row halving: average each pair of rows instead of dropping
         # every second one, so thin horizontal lines do not disappear. An odd
         # last row is cut off first, so the rows pair up exactly.
         if skip_rows:
             even_height: int = linear.shape[0] - linear.shape[0] % 2
             linear = linear[:even_height].reshape(even_height // 2, 2, -1).mean(axis=1)
 
-        # 5. Cut the image down to a whole number of blocks; one block of
+        # Step 5: Cut the image down to a whole number of blocks, one block of
         # block_size x block_size pixels becomes one character.
         clamped_scale: int = self._clamp_scale(scale)
         block_size: int = 1 << clamped_scale
@@ -162,7 +256,7 @@ class ImgConverter:
         width: int = linear.shape[1] - linear.shape[1] % block_size
         linear = linear[:height, :width]
 
-        # 6. Average each block: the reshape splits rows and columns into
+        # Step 6: Average each block: the reshape splits rows and columns into
         # (block index, position inside the block), and the mean over the two
         # inside-block axes leaves one value per block.
         if block_size > 1:
@@ -170,23 +264,33 @@ class ImgConverter:
                 height // block_size, block_size, width // block_size, block_size
             ).mean((1, 3))
 
-        # 7. Back from linear light to 0-255 sRGB values.
+        # Step 7: Back from linear light to 0-255 sRGB values.
         srgb: npt.NDArray[np.uint8] = self._linear_to_srgb(linear)
 
-        # 8. Brightness to character: 256 values split into len(chars) equal-width
+        # Step 8: Brightness to character: 256 values split into len(chars) equal-width
         # buckets, darkest bucket gets the first (densest) character.
         char_indices: npt.NDArray[np.uint16] = (
             srgb.astype(np.uint16) * len(chars) // 256
         )
         self._ascii_array = chars[char_indices]
 
-        # 9. Remember the arguments this result was made with, for the cache check.
+        # Step 9: Remember the arguments this result was made with, for the cache check.
         self._scale = clamped_scale
         self._advanced_set = advanced_set
         self._skip_rows = skip_rows
         self._invert = invert
 
     def _linear_to_srgb(self, linear: npt.NDArray[np.float32]) -> npt.NDArray[np.uint8]:
+        """
+        Convert linear light values back to 0-255 sRGB values.
+
+        :param linear: Linear light brightness, one value per pixel, 0-1.
+        :type linear: npt.NDArray[np.float32]
+
+        :return: The sRGB values, rounded to whole 0-255 numbers.
+        :rtype: npt.NDArray[np.uint8]
+        """
+
         # Inverse of the sRGB transfer function used for _SRGB_TO_LINEAR:
         # a linear segment near black, a 1/2.4 power curve above it.
         srgb: npt.NDArray[np.float32] = np.where(
@@ -194,15 +298,49 @@ class ImgConverter:
             linear * 12.92,
             1.055 * np.power(linear, 1 / 2.4) - 0.055,
         )
+
         # Scale 0-1 to 0-255 and round to whole values.
         return np.round(srgb * 255).astype(np.uint8)
 
     def _clamp_scale(self, scale: int) -> int:
+        """
+        Clamp a scale into the 0 to ``MAX_SCALE`` range.
+
+        :param scale: The scale to clamp.
+        :type scale: int
+
+        :return: The clamped scale.
+        :rtype: int
+        """
+
         return max(0, min(scale, self.MAX_SCALE))
 
     def _validate_conversion_args(
         self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
     ) -> None:
+        """
+        Check the conversion arguments and reject a conversion that is
+        requested before an image is loaded.
+
+        A scale outside 0-MAX_SCALE is clamped and a warning is raised at the
+        caller of the public method.
+
+        :param scale: The requested scale.
+        :type scale: int
+
+        :param advanced_set: Whether the advanced character set is requested.
+        :type advanced_set: bool
+
+        :param skip_rows: Whether row halving is requested.
+        :type skip_rows: bool
+
+        :param invert: Whether brightness inversion is requested.
+        :type invert: bool
+
+        :raises TypeError: When an argument has the wrong type.
+        :raises ImageNotLoadedError: When no image is loaded yet.
+        """
+
         # bool is a subclass of int, so True would otherwise pass as scale 1.
         if isinstance(scale, bool) or not isinstance(scale, int):
             raise TypeError("scale must be an integer")
@@ -221,22 +359,53 @@ class ImgConverter:
 
         clamped_scale: int = self._clamp_scale(scale)
         if clamped_scale != scale:
-            # stacklevel=3 points the warning at the caller of the public method, not at this helper.
+            # stacklevel=3 points the warning at the caller of the public method,
+            # not at this helper.
             warnings.warn(
-                f"scale {scale} is out of range 0-{self.MAX_SCALE}, using {clamped_scale}",
+                f"scale {scale} is out of range 0-{self.MAX_SCALE}, "
+                f"using {clamped_scale}",
                 stacklevel=3,
             )
 
     def _ascii_to_string(self) -> str:
+        """
+        Join the cached ASCII art into one string, one image row per line.
+
+        :return: The ASCII art with a newline between rows.
+        :rtype: str
+        """
+
         return "\n".join("".join(row) for row in self._ascii_array)
 
     def _needs_conversion(
         self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
     ) -> bool:
+        """
+        Check whether the cached ASCII art still matches the requested
+        arguments.
+
+        Scales are compared after clamping, so a scale above MAX_SCALE reuses
+        a result made for MAX_SCALE.
+
+        :param scale: The requested scale.
+        :type scale: int
+
+        :param advanced_set: Whether the advanced character set is requested.
+        :type advanced_set: bool
+
+        :param skip_rows: Whether row halving is requested.
+        :type skip_rows: bool
+
+        :param invert: Whether brightness inversion is requested.
+        :type invert: bool
+
+        :return: True when ``_convert_to_ascii`` has to run again.
+        :rtype: bool
+        """
+
         if self._ascii_array is None:
             return True
 
-        # Scales are compared after clamping, so scale 7 reuses a result made for 6.
         return (
             self._clamp_scale(scale) != self._scale
             or advanced_set != self._advanced_set
@@ -245,11 +414,32 @@ class ImgConverter:
         )
 
     def _is_supported_format(self, image_format: str | None) -> bool:
+        """
+        Check a format ID or file extension against the supported list.
+
+        :param image_format: The format Pillow reports for the image, or an
+            output file extension.
+        :type image_format: str | None
+
+        :return: True when the format is in the supported list.
+        :rtype: bool
+        """
+
         return (
             image_format is not None and image_format.lower() in self._SUPPORTED_FORMATS
         )
 
     def _check_pixel_limit(self, image: Image.Image) -> None:
+        """
+        Reject an image whose decoded size would exceed the pixel limit.
+
+        :param image: The image to check, its size comes from the header.
+        :type image: Image.Image
+
+        :raises ImgConverterError: When the image has more pixels than the
+            limit.
+        """
+
         # The size comes from the header, so this runs before any pixels are decoded.
         if image.width * image.height > self._PIXELS_LIMIT:
             raise ImgConverterError(
@@ -257,6 +447,18 @@ class ImgConverter:
             )
 
     def _check_jpeg_size(self, signature: bytes, size: int) -> None:
+        """
+        Reject a JPEG that is too big to open safely.
+
+        :param signature: The first bytes of the file, used to find JPEGs.
+        :type signature: bytes
+
+        :param size: Size of the image data in bytes.
+        :type size: int
+
+        :raises ImgConverterError: When the file is a JPEG over the size limit.
+        """
+
         # Must run before Image.open, which allocates memory for every JPEG marker
         # it reads. The signature is checked because Pillow detects the format by
         # content, regardless of the file extension.
@@ -264,6 +466,23 @@ class ImgConverter:
             raise ImgConverterError("JPEG exceeds size limit")
 
     def load_from_file(self, img_path: str | os.PathLike[str]) -> None:
+        """
+        Load an image from a local file, check its size and verify it before
+        decoding the pixels.
+
+        :param img_path: Path to the image file, ~ is expanded.
+        :type img_path: str | os.PathLike[str]
+
+        :raises TypeError: When img_path is not a string or a path-like
+            object.
+        :raises RuntimeError: When the path starts with ~ of an unknown user.
+        :raises FileNotFoundError: When the file does not exist.
+        :raises ImgConverterError: When the file exceeds the size limit or
+            fails verification or decoding.
+        :raises UnsupportedExtensionError: When the image format is not
+            supported.
+        """
+
         if not isinstance(img_path, (str, os.PathLike)):
             raise TypeError("img_path must be a string or a path-like object")
 
@@ -291,7 +510,8 @@ class ImgConverter:
         ) as error:
             raise ImgConverterError(f"Image verification failed: {error}") from error
 
-        # Unlike the in-memory buffer in load_from_url, the file can change or disappear between the two opens.
+        # Unlike the in-memory buffer in load_from_url, the file can change or
+        # disappear between the two opens.
         try:
             with Image.open(image_path, formats=self._INPUT_FORMATS) as image:
                 self._check_pixel_limit(image)
@@ -313,13 +533,39 @@ class ImgConverter:
         self._clear_cache()
 
     def load_from_url(self, img_url: str, allow_redirects: bool = False) -> None:
+        """
+        Download an image over http or https, check its size and verify it
+        before decoding the pixels.
+
+        :param img_url: The URL of the image.
+        :type img_url: str
+
+        :param allow_redirects: Follow redirects, they are blocked by default.
+        :type allow_redirects: bool
+
+        :raises TypeError: When an argument has the wrong type.
+        :raises InvalidURLError: When the URL is not a plain http or https
+            address.
+        :raises ImageDownloadError: When the download fails or takes longer
+            than the download timeout, the response is not an image, the file
+            exceeds the size limit or it fails verification.
+        :raises ImgConverterError: When the image exceeds the JPEG size or
+            pixel limit, or cannot be decoded.
+        :raises UnsupportedExtensionError: When the image format is not
+            supported.
+        """
+
         if not isinstance(img_url, str):
             raise TypeError("img_url must be a string")
 
         if not isinstance(allow_redirects, bool):
             raise TypeError("allow_redirects must be a boolean")
 
-        parsed_url: ParseResult = urlparse(img_url)
+        try:
+            parsed_url: ParseResult = urlparse(img_url)
+        except ValueError as error:
+            raise InvalidURLError(f"{img_url} is not a valid url") from error
+
         if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
             raise InvalidURLError(f"{img_url} is not a valid url")
 
@@ -355,7 +601,7 @@ class ImgConverter:
 
                 # iter_content blocks until a whole chunk arrives, so a server sending
                 # one byte at a time would never reach the deadline check. read1
-                # returns whatever has arrived; decode_content=True keeps gzip data
+                # returns whatever has arrived. decode_content=True keeps gzip data
                 # decoded, so the size limit counts the real image bytes.
                 chunk: bytes
                 while chunk := response.raw.read1(65536, decode_content=True):
@@ -405,6 +651,33 @@ class ImgConverter:
         skip_rows: bool = False,
         invert: bool = False,
     ) -> npt.NDArray[np.str_]:
+        """
+        Convert the loaded image to ASCII art and return it as an array.
+
+        The result is cached and reused when the arguments do not change. A
+        scale outside 0-MAX_SCALE is clamped and a warning is raised.
+
+        :param scale: Logarithmic scale, the block is 2 ** scale pixels wide.
+        :type scale: int
+
+        :param advanced_set: Use the larger, more detailed character set.
+        :type advanced_set: bool
+
+        :param skip_rows: Average each pair of rows before converting, which
+            halves the array height.
+        :type skip_rows: bool
+
+        :param invert: Flip brightness, for light text on a dark background.
+        :type invert: bool
+
+        :return: One character per block, one row per output line, a copy of
+            the cached result.
+        :rtype: npt.NDArray[np.str_]
+
+        :raises TypeError: When an argument has the wrong type.
+        :raises ImageNotLoadedError: When no image is loaded yet.
+        """
+
         self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
 
         if self._needs_conversion(scale, advanced_set, skip_rows, invert):
@@ -419,6 +692,32 @@ class ImgConverter:
         skip_rows: bool = True,
         invert: bool = False,
     ) -> str:
+        """
+        Convert the loaded image to ASCII art and return it as one string.
+
+        The result is cached and reused when the arguments do not change. A
+        scale outside 0-MAX_SCALE is clamped and a warning is raised.
+
+        :param scale: Logarithmic scale, the block is 2 ** scale pixels wide.
+        :type scale: int
+
+        :param advanced_set: Use the larger, more detailed character set.
+        :type advanced_set: bool
+
+        :param skip_rows: Average each pair of rows before converting, which
+            halves the number of lines.
+        :type skip_rows: bool
+
+        :param invert: Flip brightness, for light text on a dark background.
+        :type invert: bool
+
+        :return: The ASCII art with a newline between rows.
+        :rtype: str
+
+        :raises TypeError: When an argument has the wrong type.
+        :raises ImageNotLoadedError: When no image is loaded yet.
+        """
+
         self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
 
         if self._needs_conversion(scale, advanced_set, skip_rows, invert):
@@ -433,6 +732,30 @@ class ImgConverter:
         skip_rows: bool = True,
         invert: bool = False,
     ) -> None:
+        """
+        Convert the loaded image to ASCII art and print it to stdout.
+
+        The result is cached and reused when the arguments do not change. A
+        scale outside 0-MAX_SCALE is clamped and a warning is raised.
+
+        :param scale: Logarithmic scale, the block is 2 ** scale pixels wide.
+        :type scale: int
+
+        :param advanced_set: Use the larger, more detailed character set.
+        :type advanced_set: bool
+
+        :param skip_rows: Average each pair of rows before converting, which
+            halves the number of lines.
+        :type skip_rows: bool
+
+        :param invert: Flip brightness, for light text on a dark background.
+        :type invert: bool
+
+        :raises TypeError: When an argument has the wrong type.
+        :raises ImageNotLoadedError: When no image is loaded yet.
+        :raises OSError: When stdout cannot be written, e.g. a closed pipe.
+        """
+
         self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
 
         if self._needs_conversion(scale, advanced_set, skip_rows, invert):
@@ -450,6 +773,47 @@ class ImgConverter:
         skip_rows: bool = True,
         invert: bool = False,
     ) -> None:
+        """
+        Convert the loaded image to ASCII art and render it into an image
+        file with black text on a white background.
+
+        A scale outside 0-MAX_SCALE is clamped and a warning is raised.
+
+        :param out_path: Path of the file to save, the format comes from the
+            extension.
+        :type out_path: str | os.PathLike[str]
+
+        :param overwrite: Replace the file when it already exists.
+        :type overwrite: bool
+
+        :param scale: Logarithmic scale, the block is 2 ** scale pixels wide.
+        :type scale: int
+
+        :param advanced_set: Use the larger, more detailed character set.
+        :type advanced_set: bool
+
+        :param font_size: Font size in pixels of the rendered text.
+        :type font_size: int
+
+        :param skip_rows: Average each pair of rows before converting, which
+            halves the number of lines.
+        :type skip_rows: bool
+
+        :param invert: Flip brightness.
+        :type invert: bool
+
+        :raises TypeError: When an argument has the wrong type.
+        :raises ValueError: When font_size is not greater than 0, or the
+            image is smaller than one block and the result is empty.
+        :raises RuntimeError: When the path starts with ~ of an unknown user.
+        :raises ImageNotLoadedError: When no image is loaded yet.
+        :raises UnsupportedExtensionError: When the output format is not
+            supported.
+        :raises TargetExistsError: When the file exists and overwrite is off.
+        :raises OSError: When the file cannot be written, e.g. a missing
+            directory or no permission.
+        """
+
         if not isinstance(out_path, (str, os.PathLike)):
             raise TypeError("out_path must be a string or a path-like object")
 
@@ -485,7 +849,7 @@ class ImgConverter:
         line_height: int = sum(self._font.getmetrics())
         width: int = math.ceil(max(self._font.getlength(line) for line in lines))
 
-        # White canvas; the text is drawn in black.
+        # White background, the text is drawn in black.
         canvas: Image.Image = Image.new("L", (width, len(lines) * line_height), 255)
         draw: ImageDraw.ImageDraw = ImageDraw.Draw(canvas)
 
@@ -498,6 +862,14 @@ class ImgConverter:
         canvas.save(output_path)
 
     def _get_font(self, font_size: int = 12) -> None:
+        """
+        Load the first monospaced font available on the system, falling back
+        to Pillow's built-in font.
+
+        :param font_size: Font size in pixels.
+        :type font_size: int
+        """
+
         # Common monospaced fonts on Windows, Linux and macOS, tried in order.
         font_names: list[str] = [
             "Courier New.ttf",
