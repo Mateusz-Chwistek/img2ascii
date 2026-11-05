@@ -85,7 +85,7 @@ class ImgConverter:
         """Initializes the ImgConverter instance."""
         self._img_array = self._ascii_array = self._font = self._scale = (
             self._advanced_set
-        ) = self._skip_rows = None
+        ) = self._skip_rows = self._invert = None
 
     def _convert_to_grayscale(self, img: Image.Image):
         """
@@ -117,7 +117,7 @@ class ImgConverter:
         return np.round(luma).astype(np.uint8)
 
     def _convert_to_ascii(
-        self, scale: int, advanced_set: bool, skip_rows: bool
+        self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
     ) -> None:
         """
         Converts the loaded image to an ASCII representation.
@@ -126,6 +126,7 @@ class ImgConverter:
             scale (int): Power of 2 that defines the size of the block window used for downscaling.
             advanced_set (bool): If True, uses a more detailed character set.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
+            invert (bool): If True, inverts brightness before conversion.
         """
         charset = (
             self._CHARSETS["advanced"] if advanced_set else self._CHARSETS["simple"]
@@ -134,7 +135,9 @@ class ImgConverter:
 
         # Averaging is done in linear light; averaging sRGB values directly
         # darkens high-contrast areas.
-        linear = self._SRGB_TO_LINEAR[self._img_array]
+        # Inverted brightness suits light text on a dark background, e.g. a dark terminal.
+        gray = 255 - self._img_array if invert else self._img_array
+        linear = self._SRGB_TO_LINEAR[gray]
 
         if skip_rows:
             # Average each pair of rows instead of dropping every second one,
@@ -158,6 +161,7 @@ class ImgConverter:
         self._scale = clamped_scale
         self._advanced_set = advanced_set
         self._skip_rows = skip_rows
+        self._invert = invert
 
     def _linear_to_srgb(self, linear: np.ndarray) -> np.ndarray:
         """
@@ -189,7 +193,7 @@ class ImgConverter:
         return max(0, min(scale, self._MAX_SCALE))
 
     def _validate_conversion_args(
-        self, scale: int, advanced_set: bool, skip_rows: bool
+        self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
     ) -> None:
         """
         Checks the arguments shared by all public conversion methods, that an image is loaded, and warns about an out of range scale.
@@ -198,6 +202,7 @@ class ImgConverter:
             scale (int): Requested scale.
             advanced_set (bool): Character set flag.
             skip_rows (bool): Row skipping flag.
+            invert (bool): Brightness inversion flag.
 
         Raises:
             TypeError: If `scale` is not an integer or a flag is not a boolean.
@@ -212,6 +217,9 @@ class ImgConverter:
 
         if not isinstance(skip_rows, bool):
             raise TypeError("skip_rows must be a boolean")
+
+        if not isinstance(invert, bool):
+            raise TypeError("invert must be a boolean")
 
         if self._img_array is None:
             raise ImageNotLoadedError("Load image first")
@@ -234,7 +242,7 @@ class ImgConverter:
         return "\n".join("".join(row) for row in self._ascii_array)
 
     def _needs_conversion(
-        self, scale: int, advanced_set: bool, skip_rows: bool
+        self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
     ) -> bool:
         """
         Checks whether the cached ASCII result was made with different arguments.
@@ -244,6 +252,7 @@ class ImgConverter:
             scale (int): Requested scale.
             advanced_set (bool): Character set flag.
             skip_rows (bool): Row skipping flag.
+            invert (bool): Brightness inversion flag.
 
         Returns:
             bool: True if the ASCII result has to be computed again.
@@ -255,6 +264,7 @@ class ImgConverter:
             self._clamp_scale(scale) != self._scale
             or advanced_set != self._advanced_set
             or skip_rows != self._skip_rows
+            or invert != self._invert
         )
 
     def _is_supported_format(self, image_format: str | None) -> bool:
@@ -360,7 +370,9 @@ class ImgConverter:
         ) as e:
             raise ImgConverterError(f"Image loading failed: {e}") from e
 
-        self._ascii_array = self._scale = self._advanced_set = self._skip_rows = None
+        self._ascii_array = self._scale = self._advanced_set = self._skip_rows = (
+            self._invert
+        ) = None
 
     def load_from_url(self, img_url: str, allow_redirects: bool = False) -> None:
         """
@@ -456,10 +468,16 @@ class ImgConverter:
 
             self._img_array = self._convert_to_grayscale(img)
 
-        self._ascii_array = self._scale = self._advanced_set = self._skip_rows = None
+        self._ascii_array = self._scale = self._advanced_set = self._skip_rows = (
+            self._invert
+        ) = None
 
     def get_array(
-        self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = False
+        self,
+        scale: int = 2,
+        advanced_set: bool = False,
+        skip_rows: bool = False,
+        invert: bool = False,
     ) -> np.ndarray:
         """
         Returns the ASCII image array.
@@ -468,6 +486,7 @@ class ImgConverter:
             scale (int): Determines the size of square blocks (2^scale x 2^scale) used to reduce image resolution.
             advanced_set (bool): Use advanced character set if True.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
+            invert (bool): If True, inverts brightness, for light text on a dark background such as a dark terminal.
 
         Returns:
             np.ndarray: ASCII image as a numpy ndarray of characters.
@@ -475,15 +494,19 @@ class ImgConverter:
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        self._validate_conversion_args(scale, advanced_set, skip_rows)
+        self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
 
-        if self._needs_conversion(scale, advanced_set, skip_rows):
-            self._convert_to_ascii(scale, advanced_set, skip_rows)
+        if self._needs_conversion(scale, advanced_set, skip_rows, invert):
+            self._convert_to_ascii(scale, advanced_set, skip_rows, invert)
 
         return self._ascii_array.copy()
 
     def get_string(
-        self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True
+        self,
+        scale: int = 2,
+        advanced_set: bool = False,
+        skip_rows: bool = True,
+        invert: bool = False,
     ) -> str:
         """
         Returns the ASCII image in form of a string.
@@ -492,6 +515,7 @@ class ImgConverter:
             scale (int): Determines the size of square blocks (2^scale x 2^scale) used to reduce image resolution.
             advanced_set (bool): Use advanced character set if True.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
+            invert (bool): If True, inverts brightness, for light text on a dark background such as a dark terminal.
 
         Returns:
             str: ASCII image as a string of characters.
@@ -499,15 +523,19 @@ class ImgConverter:
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        self._validate_conversion_args(scale, advanced_set, skip_rows)
+        self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
 
-        if self._needs_conversion(scale, advanced_set, skip_rows):
-            self._convert_to_ascii(scale, advanced_set, skip_rows)
+        if self._needs_conversion(scale, advanced_set, skip_rows, invert):
+            self._convert_to_ascii(scale, advanced_set, skip_rows, invert)
 
         return self._ascii_to_string()
 
     def print_ascii(
-        self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True
+        self,
+        scale: int = 2,
+        advanced_set: bool = False,
+        skip_rows: bool = True,
+        invert: bool = False,
     ) -> None:
         """
         Prints the ASCII image to the terminal.
@@ -516,14 +544,15 @@ class ImgConverter:
             scale (int): Determines the size of square blocks (2^scale x 2^scale) used to reduce image resolution.
             advanced_set (bool): Use advanced character set if True.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
+            invert (bool): If True, inverts brightness, for light text on a dark background such as a dark terminal.
 
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        self._validate_conversion_args(scale, advanced_set, skip_rows)
+        self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
 
-        if self._needs_conversion(scale, advanced_set, skip_rows):
-            self._convert_to_ascii(scale, advanced_set, skip_rows)
+        if self._needs_conversion(scale, advanced_set, skip_rows, invert):
+            self._convert_to_ascii(scale, advanced_set, skip_rows, invert)
 
         print(self._ascii_to_string())
 
@@ -535,6 +564,7 @@ class ImgConverter:
         advanced_set: bool = False,
         font_size: int = 12,
         skip_rows: bool = True,
+        invert: bool = False,
     ) -> None:
         """
         Saves the ASCII image as a grayscale image file.
@@ -546,6 +576,7 @@ class ImgConverter:
             advanced_set (bool): Use advanced character set if True.
             font_size (int): Font size used to create image.
             skip_rows (bool): If True, uses every second row of pixels, to compensate for character cells being about twice as tall as wide.
+            invert (bool): If True, inverts brightness, for light text on a dark background such as a dark terminal.
 
         Raises:
             UnsupportedExtensionError: If the file extension is unsupported.
@@ -565,12 +596,12 @@ class ImgConverter:
         if font_size <= 0:
             raise ValueError("font_size must be greater than 0")
 
-        self._validate_conversion_args(scale, advanced_set, skip_rows)
+        self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
 
         self._get_font(font_size)
 
-        if self._needs_conversion(scale, advanced_set, skip_rows):
-            self._convert_to_ascii(scale, advanced_set, skip_rows)
+        if self._needs_conversion(scale, advanced_set, skip_rows, invert):
+            self._convert_to_ascii(scale, advanced_set, skip_rows, invert)
 
         out_path = Path(out_path).expanduser().resolve()
         out_format = out_path.suffix.lstrip(".")
@@ -678,7 +709,16 @@ def main():
         help="allow redirects when using image from url",
     )
 
+    parser.add_argument(
+        "--invert",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="invert brightness for light text on a dark background; on by default when printing to the terminal, off when saving to an image",
+    )
+
     args = parser.parse_args()
+    # A dark terminal needs inverted brightness, a saved image (black text on white) does not.
+    invert = args.invert if args.invert is not None else not args.output
     conv = ImgConverter()
 
     try:
@@ -695,11 +735,15 @@ def main():
                 advanced_set=args.advanced,
                 font_size=args.font_size,
                 skip_rows=True,
+                invert=invert,
             )
             print(f"Saved to: {args.output}")
         else:
             conv.print_ascii(
-                scale=args.scale, advanced_set=args.advanced, skip_rows=True
+                scale=args.scale,
+                advanced_set=args.advanced,
+                skip_rows=True,
+                invert=invert,
             )
 
         # Force buffered output out here, so a closed pipe is reported inside this try and not at interpreter exit.
