@@ -237,37 +237,31 @@ class ImgConverter:
         if p.scheme not in ("http", "https") or not p.netloc:
             raise InvalidURLError(f"{img_url} is not a valid url")
         
-        try:
-            head = requests.head(img_url, timeout=5, allow_redirects=allow_redirects)
-            head.raise_for_status()
-        except requests.RequestException as e:
-            raise ImageDownloadError(f"Failed to get header: {e}")
-
-        if head.is_redirect and not allow_redirects:
-            raise ImageDownloadError("Redirect blocked. Use --allow-redirect")
-
-        content_type = head.headers.get("Content-Type", "")
-        if not content_type.startswith("image/"):
-            raise ImageDownloadError("Incorrect Content-Type in response")
-
-        content_length = head.headers.get("Content-Length", 0)
-        try:
-            content_length = int(content_length)
-        except ValueError as e:
-            raise ImageDownloadError("Incorrect Content-Length in response")
-        
-        if content_length and content_length > self._IMAGE_SIZE_LIMIT:
-            raise ImageDownloadError("Incorrect file size")
-        
         buf = BytesIO()
         try:
-            resp = requests.get(img_url, timeout=5, allow_redirects=allow_redirects, stream=True)
-            resp.raise_for_status()
-            
-            for chunk in resp.iter_content(65536):
-                buf.write(chunk)
-                if buf.tell() > self._IMAGE_SIZE_LIMIT:
-                    raise ImageDownloadError("Image exceeds size limit")
+            with requests.get(img_url, timeout=5, allow_redirects=allow_redirects, stream=True) as resp:
+                resp.raise_for_status()
+                
+                if resp.is_redirect and not allow_redirects:
+                    raise ImageDownloadError("Redirect blocked. Use --allow-redirects")
+                
+                content_type = resp.headers.get("Content-Type", "")
+                if not content_type.startswith("image/"):
+                    raise ImageDownloadError("Incorrect Content-Type in response")
+                
+                content_length = resp.headers.get("Content-Length", 0)
+                try:
+                    content_length = int(content_length)
+                except ValueError as e:
+                    raise ImageDownloadError("Incorrect Content-Length in response")
+                        
+                if content_length and content_length > self._IMAGE_SIZE_LIMIT:
+                    raise ImageDownloadError("Incorrect file size")
+                
+                for chunk in resp.iter_content(65536):
+                    buf.write(chunk)
+                    if buf.tell() > self._IMAGE_SIZE_LIMIT:
+                        raise ImageDownloadError("Image exceeds size limit")
                 
         except requests.RequestException as e:
             raise ImageDownloadError(f"Download failed: {e}")
