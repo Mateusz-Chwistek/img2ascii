@@ -1,4 +1,5 @@
 import requests
+import urllib3
 import numpy as np
 from io import BytesIO
 from pathlib import Path
@@ -9,6 +10,7 @@ import math
 import os
 import sys
 import warnings
+import time
 
 
 class ImgConverterError(Exception):
@@ -70,6 +72,9 @@ class ImgConverter:
         30 * 1024 * 1024
     )  # Pillow's JPEG plugin uses ~60x the file size in memory on a file of empty markers
     _JPEG_SIGNATURE = b"\xff\xd8\xff"
+    _DOWNLOAD_TIMEOUT = (
+        15  # Seconds; limit for the whole download and for a single socket read
+    )
 
     def __init__(self):
         """Initializes the ImgConverter instance."""
@@ -344,9 +349,14 @@ class ImgConverter:
             raise InvalidURLError(f"{img_url} is not a valid url")
 
         buf = BytesIO()
+        # Deadline set before the request so connect and header time count too
+        deadline = time.monotonic() + self._DOWNLOAD_TIMEOUT
         try:
             with requests.get(
-                img_url, timeout=5, allow_redirects=allow_redirects, stream=True
+                img_url,
+                timeout=self._DOWNLOAD_TIMEOUT,
+                allow_redirects=allow_redirects,
+                stream=True,
             ) as resp:
                 resp.raise_for_status()
 
@@ -368,12 +378,19 @@ class ImgConverter:
                 if content_length and content_length > self._IMAGE_SIZE_LIMIT:
                     raise ImageDownloadError("Incorrect file size")
 
-                for chunk in resp.iter_content(65536):
+                # iter_content blocks until a whole chunk arrives, so a server sending
+                # one byte at a time would never reach the deadline check. read1
+                # returns whatever has arrived; decode_content=True keeps gzip data
+                # decoded, so the size limit counts the real image bytes.
+                while chunk := resp.raw.read1(65536, decode_content=True):
                     buf.write(chunk)
                     if buf.tell() > self._IMAGE_SIZE_LIMIT:
                         raise ImageDownloadError("Image exceeds size limit")
+                    if time.monotonic() > deadline:
+                        raise ImageDownloadError("Download took too long")
 
-        except requests.RequestException as e:
+        # Errors while reading resp.raw come from urllib3, not wrapped by requests.
+        except (requests.RequestException, urllib3.exceptions.HTTPError) as e:
             raise ImageDownloadError(f"Download failed: {e}") from e
 
         self._check_jpeg_size(

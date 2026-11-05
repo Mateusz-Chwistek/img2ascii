@@ -19,6 +19,7 @@ license = {text = "MIT"}
 dependencies = [
   "numpy>=2.5.4,<3",
   "requests>=2.34.2,<3",
+  "urllib3>=2.8.0,<3",
   "pillow>=13.0.0,<14"
 ]
 
