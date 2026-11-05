@@ -10,55 +10,83 @@ import os
 import sys
 import warnings
 
+
 class ImgConverterError(Exception):
     """Base ImgConverter exception"""
+
 
 class ImageNotLoadedError(ImgConverterError):
     """Raised when an image is not loaded properly"""
 
+
 class InvalidURLError(ImgConverterError):
     """Raised when a provided URL is invalid"""
+
 
 class UnsupportedExtensionError(ImgConverterError):
     """Raised when the file extension is not supported"""
 
+
 class ImageDownloadError(ImgConverterError):
     """Raised when an image cannot be downloaded"""
+
 
 class TargetExistsError(ImgConverterError):
     """Raised when a file already exists at the target location"""
 
+
 class ImgConverter:
-    _SUPPORTED_FORMATS = ("jpeg", "jpg", "png", "webp",
-                      "tif", "tiff", "bmp", "ppm",
-                      "pgm", "pbm", "ico")
-    _INPUT_FORMATS = ("JPEG", "PNG", "WEBP", "TIFF", "BMP", "PPM") # Pillow plugin IDs; ICO is left out because its plugin decodes pixels already in Image.open
+    _SUPPORTED_FORMATS = (
+        "jpeg",
+        "jpg",
+        "png",
+        "webp",
+        "tif",
+        "tiff",
+        "bmp",
+        "ppm",
+        "pgm",
+        "pbm",
+        "ico",
+    )
+    _INPUT_FORMATS = (
+        "JPEG",
+        "PNG",
+        "WEBP",
+        "TIFF",
+        "BMP",
+        "PPM",
+    )  # Pillow plugin IDs; ICO is left out because its plugin decodes pixels already in Image.open
     _CHARSETS = {
         "simple": "@%#*+=-:. ",
         "advanced": "@$B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvu"
-                    "nxrjft/\\|()1}{][?-_+~i!lI;:,\"^`'. "
+        "nxrjft/\\|()1}{][?-_+~i!lI;:,\"^`'. ",
     }
     _MAX_SCALE = 6
-    _PIXELS_LIMIT = 8_847_360 # DCI-4K 4096x2160
-    _BYTES_PER_PIXEL_WORST = 8 # 4 channels * 2 bytes
+    _PIXELS_LIMIT = 8_847_360  # DCI-4K 4096x2160
+    _BYTES_PER_PIXEL_WORST = 8  # 4 channels * 2 bytes
     _IMAGE_SIZE_LIMIT = _PIXELS_LIMIT * _BYTES_PER_PIXEL_WORST
-    _JPEG_SIZE_LIMIT = 30 * 1024 * 1024 # Pillow's JPEG plugin uses ~60x the file size in memory on a file of empty markers
+    _JPEG_SIZE_LIMIT = (
+        30 * 1024 * 1024
+    )  # Pillow's JPEG plugin uses ~60x the file size in memory on a file of empty markers
     _JPEG_SIGNATURE = b"\xff\xd8\xff"
 
     def __init__(self):
         """Initializes the ImgConverter instance."""
-        self._img_array = self._ascii_array = self._font = self._scale = self._advanced_set = self._skip_rows = None
-    
+        self._img_array = self._ascii_array = self._font = self._scale = (
+            self._advanced_set
+        ) = self._skip_rows = None
+
     def _convert_to_grayscale(self, img: Image.Image):
         """
         Extracts green channel, and zero-out fully transparent pixels.
-        
+
         Args:
             img (PIL.Image.Image): Input pillow image.
-        
+
         Returns:
             np.ndarray: 2D array (H x W) of green-channel values, dtype uint8.
-        
+
         Raises:
             ImgConverterError: If the image data cannot be decoded (wraps OSError).
         """
@@ -75,24 +103,28 @@ class ImgConverter:
         luma = np.where(alpha == 0, 255, luma)
 
         return luma.astype(np.uint8)
-    
-    def _convert_to_ascii(self, scale: int, advanced_set: bool, skip_rows: bool) -> None:
+
+    def _convert_to_ascii(
+        self, scale: int, advanced_set: bool, skip_rows: bool
+    ) -> None:
         """
         Converts the loaded image to an ASCII representation.
-        
+
         Args:
             scale (int): Power of 2 that defines the size of the block window used for downscaling.
             advanced_set (bool): If True, uses a more detailed character set.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
         """
-        charset = self._CHARSETS["advanced"] if advanced_set else self._CHARSETS["simple"]
+        charset = (
+            self._CHARSETS["advanced"] if advanced_set else self._CHARSETS["simple"]
+        )
         chars = np.asarray(list(charset), dtype="<U1")
 
         if skip_rows:
             arr = self._img_array[::2]
         else:
             arr = self._img_array
-        
+
         h, w = arr.shape
         clamped_scale = self._clamp_scale(scale)
         block = 1 << clamped_scale
@@ -101,9 +133,13 @@ class ImgConverter:
         arr = arr[:h, :w]
 
         if block > 1:
-            arr = arr.reshape(h // block, block, w // block, block).mean((1, 3)).astype(np.uint8)
+            arr = (
+                arr.reshape(h // block, block, w // block, block)
+                .mean((1, 3))
+                .astype(np.uint8)
+            )
 
-        self._ascii_array = chars[(arr.astype(np.uint16) * (len(chars)-1) // 255)]
+        self._ascii_array = chars[(arr.astype(np.uint16) * (len(chars) - 1) // 255)]
         self._scale = clamped_scale
         self._advanced_set = advanced_set
         self._skip_rows = skip_rows
@@ -120,7 +156,9 @@ class ImgConverter:
         """
         return max(0, min(scale, self._MAX_SCALE))
 
-    def _validate_conversion_args(self, scale: int, advanced_set: bool, skip_rows: bool) -> None:
+    def _validate_conversion_args(
+        self, scale: int, advanced_set: bool, skip_rows: bool
+    ) -> None:
         """
         Checks the arguments shared by all public conversion methods, that an image is loaded, and warns about an out of range scale.
 
@@ -149,9 +187,14 @@ class ImgConverter:
         clamped_scale = self._clamp_scale(scale)
         if clamped_scale != scale:
             # stacklevel=3 points the warning at the caller of the public method, not at this helper.
-            warnings.warn(f"scale {scale} is out of range 0-{self._MAX_SCALE}, using {clamped_scale}", stacklevel=3)
+            warnings.warn(
+                f"scale {scale} is out of range 0-{self._MAX_SCALE}, using {clamped_scale}",
+                stacklevel=3,
+            )
 
-    def _needs_conversion(self, scale: int, advanced_set: bool, skip_rows: bool) -> bool:
+    def _needs_conversion(
+        self, scale: int, advanced_set: bool, skip_rows: bool
+    ) -> bool:
         """
         Checks whether the cached ASCII result was made with different arguments.
         Scales are compared after clamping, so scale 7 reuses a result made for 6.
@@ -167,7 +210,11 @@ class ImgConverter:
         if self._ascii_array is None:
             return True
 
-        return self._clamp_scale(scale) != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows
+        return (
+            self._clamp_scale(scale) != self._scale
+            or advanced_set != self._advanced_set
+            or skip_rows != self._skip_rows
+        )
 
     def _is_supported_format(self, format: str | None) -> bool:
         """
@@ -178,7 +225,7 @@ class ImgConverter:
 
         Returns:
             bool: True if the file has a supported format, False otherwise.
-        """        
+        """
         return format is not None and format.lower() in self._SUPPORTED_FORMATS
 
     def _check_pixel_limit(self, img: Image.Image) -> None:
@@ -192,7 +239,9 @@ class ImgConverter:
             ImgConverterError: If the image exceeds the pixel limit.
         """
         if img.width * img.height > self._PIXELS_LIMIT:
-            raise ImgConverterError(f"Image exceeds pixel limit: {img.width}x{img.height}")
+            raise ImgConverterError(
+                f"Image exceeds pixel limit: {img.width}x{img.height}"
+            )
 
     def _check_jpeg_size(self, signature: bytes, size: int) -> None:
         """
@@ -212,10 +261,10 @@ class ImgConverter:
     def load_from_file(self, img_path: str | os.PathLike[str]) -> None:
         """
         Loads an image from a local file and converts it to ndarray.
-        
+
         Args:
             img_path (str): Path to the image file.
-        
+
         Raises:
             TypeError: If `img_path` is not a string.
             FileNotFoundError: If the file does not exist.
@@ -240,7 +289,13 @@ class ImgConverter:
             with Image.open(img_path, formats=self._INPUT_FORMATS) as img:
                 self._check_pixel_limit(img)
                 img.verify()
-        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError, ValueError) as e:
+        except (
+            UnidentifiedImageError,
+            DecompressionBombError,
+            SyntaxError,
+            OSError,
+            ValueError,
+        ) as e:
             raise ImgConverterError(f"Image verification failed: {e}") from e
 
         # Unlike the in-memory buffer in load_from_url, the file can change or disappear between the two opens.
@@ -248,21 +303,29 @@ class ImgConverter:
             with Image.open(img_path, formats=self._INPUT_FORMATS) as img:
                 self._check_pixel_limit(img)
                 if not self._is_supported_format(img.format):
-                    raise UnsupportedExtensionError(f"Unsupported file format: {img.format}")
+                    raise UnsupportedExtensionError(
+                        f"Unsupported file format: {img.format}"
+                    )
 
                 self._img_array = self._convert_to_grayscale(img)
-        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError, ValueError) as e:
+        except (
+            UnidentifiedImageError,
+            DecompressionBombError,
+            SyntaxError,
+            OSError,
+            ValueError,
+        ) as e:
             raise ImgConverterError(f"Image loading failed: {e}") from e
 
         self._ascii_array = self._scale = self._advanced_set = self._skip_rows = None
-        
+
     def load_from_url(self, img_url: str, allow_redirects: bool = False) -> None:
         """
         Loads an image from a URL and converts it to ndarray.
-        
+
         Args:
             img_url (str): URL to the image.
-        
+
         Raises:
             InvalidURLError: If the URL is not valid.
             UnsupportedExtensionError: If the file extension is not supported.
@@ -277,67 +340,83 @@ class ImgConverter:
         p = urlparse(img_url)
         if p.scheme not in ("http", "https") or not p.netloc:
             raise InvalidURLError(f"{img_url} is not a valid url")
-        
+
         buf = BytesIO()
         try:
-            with requests.get(img_url, timeout=5, allow_redirects=allow_redirects, stream=True) as resp:
+            with requests.get(
+                img_url, timeout=5, allow_redirects=allow_redirects, stream=True
+            ) as resp:
                 resp.raise_for_status()
-                
+
                 if resp.is_redirect and not allow_redirects:
                     raise ImageDownloadError("Redirect blocked. Use --allow-redirects")
-                
+
                 content_type = resp.headers.get("Content-Type", "")
                 if not content_type.startswith("image/"):
                     raise ImageDownloadError("Incorrect Content-Type in response")
-                
+
                 content_length = resp.headers.get("Content-Length", 0)
                 try:
                     content_length = int(content_length)
                 except ValueError as e:
-                    raise ImageDownloadError("Incorrect Content-Length in response")
-                        
+                    raise ImageDownloadError(
+                        "Incorrect Content-Length in response"
+                    ) from e
+
                 if content_length and content_length > self._IMAGE_SIZE_LIMIT:
                     raise ImageDownloadError("Incorrect file size")
-                
+
                 for chunk in resp.iter_content(65536):
                     buf.write(chunk)
                     if buf.tell() > self._IMAGE_SIZE_LIMIT:
                         raise ImageDownloadError("Image exceeds size limit")
-                
-        except requests.RequestException as e:
-            raise ImageDownloadError(f"Download failed: {e}")
 
-        self._check_jpeg_size(buf.getbuffer()[:len(self._JPEG_SIGNATURE)].tobytes(), buf.tell())
+        except requests.RequestException as e:
+            raise ImageDownloadError(f"Download failed: {e}") from e
+
+        self._check_jpeg_size(
+            buf.getbuffer()[: len(self._JPEG_SIGNATURE)].tobytes(), buf.tell()
+        )
 
         buf.seek(0)
         try:
             with Image.open(buf, formats=self._INPUT_FORMATS) as img:
                 self._check_pixel_limit(img)
                 img.verify()
-        except (UnidentifiedImageError, DecompressionBombError, SyntaxError, OSError, ValueError) as e:
-            raise ImageDownloadError(f"Image verification failed: {e}")
+        except (
+            UnidentifiedImageError,
+            DecompressionBombError,
+            SyntaxError,
+            OSError,
+            ValueError,
+        ) as e:
+            raise ImageDownloadError(f"Image verification failed: {e}") from e
 
         buf.seek(0)
         with Image.open(buf, formats=self._INPUT_FORMATS) as img:
             if not self._is_supported_format(img.format):
-                raise UnsupportedExtensionError(f"Unsupported file format: {img.format}")
-            
-            self._img_array = self._convert_to_grayscale(img)    
-        
+                raise UnsupportedExtensionError(
+                    f"Unsupported file format: {img.format}"
+                )
+
+            self._img_array = self._convert_to_grayscale(img)
+
         self._ascii_array = self._scale = self._advanced_set = self._skip_rows = None
-    
-    def get_array(self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = False) -> np.ndarray:
+
+    def get_array(
+        self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = False
+    ) -> np.ndarray:
         """
         Returns the ASCII image array.
-        
+
         Args:
             scale (int): Determines the size of square blocks (2^scale x 2^scale) used to reduce image resolution.
             advanced_set (bool): Use advanced character set if True.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
-            
+
         Returns:
             np.ndarray: ASCII image as a numpy ndarray of characters.
-            
+
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
@@ -346,20 +425,22 @@ class ImgConverter:
         if self._needs_conversion(scale, advanced_set, skip_rows):
             self._convert_to_ascii(scale, advanced_set, skip_rows)
 
-        return self._ascii_array
+        return self._ascii_array.copy()
 
-    def get_string(self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True) -> str:
+    def get_string(
+        self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True
+    ) -> str:
         """
         Returns the ASCII image in form of a string.
-        
+
         Args:
             scale (int): Determines the size of square blocks (2^scale x 2^scale) used to reduce image resolution.
             advanced_set (bool): Use advanced character set if True.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
-            
+
         Returns:
             str: ASCII image as a string of characters.
-            
+
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
@@ -369,16 +450,18 @@ class ImgConverter:
             self._convert_to_ascii(scale, advanced_set, skip_rows)
 
         return "\n".join("".join(row) for row in self._ascii_array)
-    
-    def print_ascii(self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True) -> None:
+
+    def print_ascii(
+        self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True
+    ) -> None:
         """
         Prints the ASCII image to the terminal.
-        
+
         Args:
             scale (int): Determines the size of square blocks (2^scale x 2^scale) used to reduce image resolution.
             advanced_set (bool): Use advanced character set if True.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
-            
+
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
@@ -388,11 +471,19 @@ class ImgConverter:
             self._convert_to_ascii(scale, advanced_set, skip_rows)
 
         print("\n".join("".join(row) for row in self._ascii_array))
-    
-    def save_to_img(self, out_path: str | os.PathLike[str] = "ascii.png", overwrite: bool = False, scale: int = 2, advanced_set: bool = False, font_size: int = 12, skip_rows: bool = True) -> None:
+
+    def save_to_img(
+        self,
+        out_path: str | os.PathLike[str] = "ascii.png",
+        overwrite: bool = False,
+        scale: int = 2,
+        advanced_set: bool = False,
+        font_size: int = 12,
+        skip_rows: bool = True,
+    ) -> None:
         """
         Saves the ASCII image as a grayscale image file.
-        
+
         Args:
             out_path (str): Path (including extension) to save the image.
             overwrite (bool): Whether to overwrite preexisting file.
@@ -400,7 +491,7 @@ class ImgConverter:
             advanced_set (bool): Use advanced character set if True.
             font_size (int): Font size used to create image.
             skip_rows (bool): If True, uses every second row of pixels, to compensate for character cells being about twice as tall as wide.
-            
+
         Raises:
             UnsupportedExtensionError: If the file extension is unsupported.
             TargetExistsError: If the file exists and overwrite is False.
@@ -425,12 +516,12 @@ class ImgConverter:
 
         if self._needs_conversion(scale, advanced_set, skip_rows):
             self._convert_to_ascii(scale, advanced_set, skip_rows)
-        
+
         out_path = Path(out_path).expanduser().resolve()
         out_format = out_path.suffix.lstrip(".")
         if not self._is_supported_format(out_format):
             raise UnsupportedExtensionError(f"Unsupported file format: {out_format}")
-        
+
         if out_path.is_file() and not overwrite:
             raise TargetExistsError(f"Output file: {out_path} already exist.")
 
@@ -441,20 +532,22 @@ class ImgConverter:
         cell_width = math.ceil(self._font.getlength("M"))
         cell_height = ascent + descent
 
-        img = Image.new("L", (w*cell_width, h*cell_height), 255)
+        img = Image.new("L", (w * cell_width, h * cell_height), 255)
         draw = ImageDraw.Draw(img)
 
         for y, row in enumerate(self._ascii_array):
             for x, char in enumerate(row):
-                draw.text((x*cell_width, y*cell_height), char, font=self._font, fill=0)
+                draw.text(
+                    (x * cell_width, y * cell_height), char, font=self._font, fill=0
+                )
 
         img.save(out_path)
-    
+
     def _get_font(self, font_size: int = 12) -> None:
         """
         Loads a monospaced font for drawing text to an image.
         Tries several common fonts and falls back to the default if none load.
-        
+
         Args:
             font_size (int): Font size used to create image.
         """
@@ -463,69 +556,74 @@ class ImgConverter:
             "DejaVuSansMono.ttf",
             "LiberationMono-Regular.ttf",
             "Menlo.ttc",
-            "Consolas.ttf"
+            "Consolas.ttf",
         ]
-        
+
         for font in fonts:
             try:
                 self._font = ImageFont.truetype(font, font_size)
                 return
-            except (OSError, IOError):
+            except OSError:
                 continue
-            
-        self._font = ImageFont.load_default()
-        
+
+        self._font = ImageFont.load_default(size=font_size)
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(
         prog="img2ascii",
-        description="Converts an image to ASCII art (print or save to file)."
+        description="Converts an image to ASCII art (print or save to file).",
     )
 
     src = parser.add_mutually_exclusive_group(required=True)
-    src.add_argument("-f", "--file", metavar="PATH",
-                     help="path to a local image file")
-    src.add_argument("-u", "--url", metavar="URL",
-                     help="URL of the image")
+    src.add_argument("-f", "--file", metavar="PATH", help="path to a local image file")
+    src.add_argument("-u", "--url", metavar="URL", help="URL of the image")
 
     parser.add_argument(
-        "-s", "--scale",
+        "-s",
+        "--scale",
         type=int,
         default=2,
         choices=range(0, ImgConverter._MAX_SCALE + 1),
-        help="logarithmic scale factor (0–6), default is 2"
+        help="logarithmic scale factor (0–6), default is 2",
     )
 
     parser.add_argument(
-        "-a", "--advanced",
+        "-a",
+        "--advanced",
         action="store_true",
         default=False,
-        help="use the extended character set, default is False"
+        help="use the extended character set, default is False",
     )
 
     parser.add_argument(
-        "-o", "--output", metavar="PATH",
-        help="save result to an image file instead of printing to the terminal"
+        "-o",
+        "--output",
+        metavar="PATH",
+        help="save result to an image file instead of printing to the terminal",
     )
 
     parser.add_argument(
-        "--font-size", type=int, default=12,
-        help="font size when saving the file to image, default is 12"
+        "--font-size",
+        type=int,
+        default=12,
+        help="font size when saving the file to image, default is 12",
     )
 
     parser.add_argument(
         "--overwrite",
         action="store_true",
         default=False,
-        help="overwrite existing output file"
+        help="overwrite existing output file",
     )
-    
+
     parser.add_argument(
         "--allow-redirects",
         action="store_true",
         default=False,
-        help="allow redirects when using image from url"
+        help="allow redirects when using image from url",
     )
 
     args = parser.parse_args()
@@ -544,14 +642,12 @@ def main():
                 scale=args.scale,
                 advanced_set=args.advanced,
                 font_size=args.font_size,
-                skip_rows=True
+                skip_rows=True,
             )
             print(f"Saved to: {args.output}")
         else:
             conv.print_ascii(
-                scale=args.scale,
-                advanced_set=args.advanced,
-                skip_rows=True
+                scale=args.scale, advanced_set=args.advanced, skip_rows=True
             )
 
         # Force buffered output out here, so a closed pipe is reported inside this try and not at interpreter exit.
@@ -563,4 +659,3 @@ def main():
     except (ImgConverterError, OSError, ValueError, RuntimeError) as e:
         print(f"{parser.prog}: error: {e}", file=sys.stderr)
         sys.exit(1)
-    
