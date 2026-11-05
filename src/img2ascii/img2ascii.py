@@ -8,30 +8,25 @@ from PIL import Image, ImageFont, ImageDraw, UnidentifiedImageError
 import math
 import os
 import sys
+import warnings
 
 class ImgConverterError(Exception):
     """Base ImgConverter exception"""
-    pass
 
 class ImageNotLoadedError(ImgConverterError):
     """Raised when an image is not loaded properly"""
-    pass
 
 class InvalidURLError(ImgConverterError):
     """Raised when a provided URL is invalid"""
-    pass
 
 class UnsupportedExtensionError(ImgConverterError):
     """Raised when the file extension is not supported"""
-    pass
 
 class ImageDownloadError(ImgConverterError):
     """Raised when an image cannot be downloaded"""
-    pass
 
 class TargetExistsError(ImgConverterError):
     """Raised when a file already exists at the target location"""
-    pass
 
 class ImgConverter:
     _SUPPORTED_FORMATS = ("jpeg", "jpg", "png", "webp",
@@ -65,20 +60,14 @@ class ImgConverter:
             np.ndarray: 2D array (H x W) of green-channel values, dtype uint8.
         
         Raises:
-            ImgConverterError: If `img` is not a pillow Image, or if its data cannot be decoded (wraps OSError).
+            ImgConverterError: If the image data cannot be decoded (wraps OSError).
         """
-        if not isinstance(img, Image.Image):
-            raise ImgConverterError("Image is not a pillow image")
-
         try:
             img_rgba = img.convert("RGBA")
         except OSError as e:
             raise ImgConverterError(f"Image decoding failed: {e}") from e
 
         rgba = np.asarray(img_rgba, dtype=np.uint8)
-
-        if rgba.ndim != 3 or rgba.shape[-1] != 4:
-            raise ValueError("Expected RGBA array of shape (H, W, 4)")
 
         luma = np.dot(rgba[..., :3].astype(np.float32), [0.2126, 0.7152, 0.0722])
 
@@ -95,21 +84,9 @@ class ImgConverter:
             scale (int): Power of 2 that defines the size of the block window used for downscaling.
             advanced_set (bool): If True, uses a more detailed character set.
             skip_rows (bool): If True, uses every second row of pixels, for better display in console.
-        
-        Raises:
-            ImageNotLoadedError: If no image is loaded.
         """
-        if not isinstance(advanced_set, bool):
-            raise ValueError("advanced_set must be a boolean")
-        
-        if not isinstance(scale, int):
-            raise ValueError("scale must be a integer")
-        
         charset = self._CHARSETS["advanced"] if advanced_set else self._CHARSETS["simple"]
         chars = np.asarray(list(charset), dtype="<U1")
-
-        if self._img_array is None:
-            raise ImageNotLoadedError("Load image first")
 
         if skip_rows:
             arr = self._img_array[::2]
@@ -117,7 +94,7 @@ class ImgConverter:
             arr = self._img_array
         
         h, w = arr.shape
-        clamped_scale = max(0, min(scale, self._MAX_SCALE))
+        clamped_scale = self._clamp_scale(scale)
         block = 1 << clamped_scale
         h -= h % block
         w -= w % block
@@ -127,10 +104,71 @@ class ImgConverter:
             arr = arr.reshape(h // block, block, w // block, block).mean((1, 3)).astype(np.uint8)
 
         self._ascii_array = chars[(arr.astype(np.uint16) * (len(chars)-1) // 255)]
-        self._scale = scale
+        self._scale = clamped_scale
         self._advanced_set = advanced_set
         self._skip_rows = skip_rows
-    
+
+    def _clamp_scale(self, scale: int) -> int:
+        """
+        Limits scale to the supported range.
+
+        Args:
+            scale (int): Requested scale.
+
+        Returns:
+            int: Scale clamped to 0..._MAX_SCALE.
+        """
+        return max(0, min(scale, self._MAX_SCALE))
+
+    def _validate_conversion_args(self, scale: int, advanced_set: bool, skip_rows: bool) -> None:
+        """
+        Checks the arguments shared by all public conversion methods, that an image is loaded, and warns about an out of range scale.
+
+        Args:
+            scale (int): Requested scale.
+            advanced_set (bool): Character set flag.
+            skip_rows (bool): Row skipping flag.
+
+        Raises:
+            TypeError: If `scale` is not an integer or a flag is not a boolean.
+            ImageNotLoadedError: If no image is loaded.
+        """
+        # bool is a subclass of int, so True would otherwise pass as scale 1.
+        if isinstance(scale, bool) or not isinstance(scale, int):
+            raise TypeError("scale must be an integer")
+
+        if not isinstance(advanced_set, bool):
+            raise TypeError("advanced_set must be a boolean")
+
+        if not isinstance(skip_rows, bool):
+            raise TypeError("skip_rows must be a boolean")
+
+        if self._img_array is None:
+            raise ImageNotLoadedError("Load image first")
+
+        clamped_scale = self._clamp_scale(scale)
+        if clamped_scale != scale:
+            # stacklevel=3 points the warning at the caller of the public method, not at this helper.
+            warnings.warn(f"scale {scale} is out of range 0-{self._MAX_SCALE}, using {clamped_scale}", stacklevel=3)
+
+    def _needs_conversion(self, scale: int, advanced_set: bool, skip_rows: bool) -> bool:
+        """
+        Checks whether the cached ASCII result was made with different arguments.
+        Scales are compared after clamping, so scale 7 reuses a result made for 6.
+
+        Args:
+            scale (int): Requested scale.
+            advanced_set (bool): Character set flag.
+            skip_rows (bool): Row skipping flag.
+
+        Returns:
+            bool: True if the ASCII result has to be computed again.
+        """
+        if self._ascii_array is None:
+            return True
+
+        return self._clamp_scale(scale) != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows
+
     def _is_supported_format(self, format: str | None) -> bool:
         """
         Check if the file has a supported format.
@@ -141,7 +179,7 @@ class ImgConverter:
         Returns:
             bool: True if the file has a supported format, False otherwise.
         """        
-        return format is not None and str(format).lower() in self._SUPPORTED_FORMATS
+        return format is not None and format.lower() in self._SUPPORTED_FORMATS
 
     def _check_pixel_limit(self, img: Image.Image) -> None:
         """
@@ -171,7 +209,7 @@ class ImgConverter:
         if signature.startswith(self._JPEG_SIGNATURE) and size > self._JPEG_SIZE_LIMIT:
             raise ImgConverterError("JPEG exceeds size limit")
 
-    def load_from_file(self, img_path: str) -> None:
+    def load_from_file(self, img_path: str | os.PathLike[str]) -> None:
         """
         Loads an image from a local file and converts it to ndarray.
         
@@ -184,8 +222,8 @@ class ImgConverter:
             UnsupportedExtensionError: If the file extension is not supported.
             ImgConverterError: If the file cannot be read, is not a valid image or exceeds the size or pixel limit.
         """
-        if not isinstance(img_path, str):
-            raise TypeError("img_path must be a string")
+        if not isinstance(img_path, (str, os.PathLike)):
+            raise TypeError("img_path must be a string or a path-like object")
 
         img_path = Path(img_path).expanduser().resolve()
         if not img_path.is_file():
@@ -232,7 +270,10 @@ class ImgConverter:
         """
         if not isinstance(img_url, str):
             raise TypeError("img_url must be a string")
-        
+
+        if not isinstance(allow_redirects, bool):
+            raise TypeError("allow_redirects must be a boolean")
+
         p = urlparse(img_url)
         if p.scheme not in ("http", "https") or not p.netloc:
             raise InvalidURLError(f"{img_url} is not a valid url")
@@ -300,9 +341,11 @@ class ImgConverter:
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows:
+        self._validate_conversion_args(scale, advanced_set, skip_rows)
+
+        if self._needs_conversion(scale, advanced_set, skip_rows):
             self._convert_to_ascii(scale, advanced_set, skip_rows)
-    
+
         return self._ascii_array
 
     def get_string(self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True) -> str:
@@ -320,9 +363,11 @@ class ImgConverter:
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows:
+        self._validate_conversion_args(scale, advanced_set, skip_rows)
+
+        if self._needs_conversion(scale, advanced_set, skip_rows):
             self._convert_to_ascii(scale, advanced_set, skip_rows)
-    
+
         return "\n".join("".join(row) for row in self._ascii_array)
     
     def print_ascii(self, scale: int = 2, advanced_set: bool = False, skip_rows: bool = True) -> None:
@@ -337,12 +382,14 @@ class ImgConverter:
         Raises:
             ImageNotLoadedError: If no image is loaded.
         """
-        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows:
+        self._validate_conversion_args(scale, advanced_set, skip_rows)
+
+        if self._needs_conversion(scale, advanced_set, skip_rows):
             self._convert_to_ascii(scale, advanced_set, skip_rows)
-        
+
         print("\n".join("".join(row) for row in self._ascii_array))
     
-    def save_to_img(self, out_path: str = "ascii.png", overwrite: bool = False, scale: int = 2, advanced_set: bool = False, font_size: int = 12, skip_rows: bool = True) -> None:
+    def save_to_img(self, out_path: str | os.PathLike[str] = "ascii.png", overwrite: bool = False, scale: int = 2, advanced_set: bool = False, font_size: int = 12, skip_rows: bool = True) -> None:
         """
         Saves the ASCII image as a grayscale image file.
         
@@ -359,12 +406,24 @@ class ImgConverter:
             TargetExistsError: If the file exists and overwrite is False.
             ImageNotLoadedError: If no image is loaded.
         """
+        if not isinstance(out_path, (str, os.PathLike)):
+            raise TypeError("out_path must be a string or a path-like object")
+
         if not isinstance(overwrite, bool):
-            raise ValueError("overwrite must be a boolean")
-        
+            raise TypeError("overwrite must be a boolean")
+
+        # bool is a subclass of int, so True would otherwise pass as font size 1.
+        if isinstance(font_size, bool) or not isinstance(font_size, int):
+            raise TypeError("font_size must be an integer")
+
+        if font_size <= 0:
+            raise ValueError("font_size must be greater than 0")
+
+        self._validate_conversion_args(scale, advanced_set, skip_rows)
+
         self._get_font(font_size)
-        
-        if self._ascii_array is None or scale != self._scale or advanced_set != self._advanced_set or skip_rows != self._skip_rows:
+
+        if self._needs_conversion(scale, advanced_set, skip_rows):
             self._convert_to_ascii(scale, advanced_set, skip_rows)
         
         out_path = Path(out_path).expanduser().resolve()
@@ -399,9 +458,6 @@ class ImgConverter:
         Args:
             font_size (int): Font size used to create image.
         """
-        if not isinstance(font_size, int):
-            raise ValueError("font_size must be a integer")
-        
         fonts = [
             "Courier New.ttf",
             "DejaVuSansMono.ttf",
