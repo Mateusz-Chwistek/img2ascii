@@ -10,7 +10,7 @@ where = ["src"]
 
 [project]
 name = "img2ascii"
-version = "2.0.0"
+version = "2.1.0"
 description = "Library and a CLI tool to convert images to ascii"
 readme = "README.md"
 requires-python = ">=3.12"

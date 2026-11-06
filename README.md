@@ -1,6 +1,6 @@
 # img2ascii #
 
-**Version:** 2.0.0 \
+**Version:** 2.1.0 \
 **License:** MIT
 
 ## Overview ##
@@ -13,6 +13,7 @@
 - Two character sets: a **10**-character simple set and a **68**-character advanced set
 - Adjustable scale, from **0** to **6**
 - Optional brightness inversion for light text on a dark terminal
+- Optional background removal, in a `simple` or `smart` mode
 - Saves the `ASCII` art as an image file, with overwrite protection
 - Size limits that reject oversized or malformed images **before their pixels are decoded**
 
@@ -77,6 +78,12 @@ Once installed, the tool can be run from the terminal as `img2ascii` or as `pyth
     img2ascii -f ~/photos/demo.jpg --no-invert
     ```
 
+- Remove the background, keeping same-colored areas inside the subject:
+
+    ```bash
+    img2ascii -f ~/photos/demo.jpg -r smart
+    ```
+
 - Follow redirects when downloading:
 
     ```bash
@@ -94,6 +101,7 @@ All options:
 - `--overwrite` - replace the output file if it already exists.
 - `--allow-redirects` - follow `HTTP` redirects, which are **blocked by default**.
 - `--no-invert` - print dark text for a light terminal theme. By default, printing **inverts brightness** for light text on a dark terminal. **Only affects printing**, a saved image is always black text on white.
+- `-r, --remove-background <mode>` - replace the background with spaces, `simple` or `smart`. Off by default.
 
 Exit codes:
 
@@ -125,10 +133,10 @@ conv.load_from_url("https://example.com/image.png")
 Get the result in the form you need:
 
 ```python
-img_array = conv.get_array() # as a numpy array
-img_string = conv.get_string() # as a string ready for printing
-conv.print_ascii() # print to the terminal
-conv.save_to_img() # save as an image
+img_array = conv.get_array()  # as a numpy array
+img_string = conv.get_string()  # as a string ready for printing
+conv.print_ascii()  # print to the terminal
+conv.save_to_img()  # save as an image
 ```
 
 Pass conversion options to any of the four methods:
@@ -144,6 +152,12 @@ All four methods take the same conversion arguments:
 - `advanced_set` - use the advanced character set, default `False`.
 - `skip_rows` - average each pair of rows, which halves the height. Default `True`, **except in `get_array`**, where it is `False`.
 - `invert` - invert brightness, default `False`.
+- `remove_background` - `"simple"`, `"smart"` or `None` (the default, background kept). An unknown mode raises `ValueError`.
+
+Background removal finds the background on the **top, left and right edges** of the result; the bottom edge is skipped, because a subject often reaches it. Up to the **3** most common characters there count as background, each one only if it fills at least **5%** of those edge cells; spaces are skipped. Then:
+
+- `simple` - replaces those characters with spaces **everywhere**, also inside the subject.
+- `smart` - replaces them only where they **connect to those edges** through other background characters, so enclosed areas of the same brightness inside the subject stay.
 
 `save_to_img` also takes:
 
@@ -202,6 +216,14 @@ Advanced set:
   <img src="images/example_advanced.jpg" alt="Advanced character set" width="500">
 </div>
 
+### Background removal ###
+
+Scale **2** with `-r smart`, compared to the scale **2** result above:
+
+<div align="center">
+  <img src="images/example_smart.jpg" alt="Smart background removal" width="500">
+</div>
+
 ## Limits ##
 
 - Images can have at most **8,847,360** pixels (`DCI 4K`, `4096x2160`).
@@ -225,7 +247,7 @@ All custom exceptions derive from `ImgConverterError`, so `except ImgConverterEr
 Standard exceptions are used for the rest:
 
 - `TypeError` - an argument has the wrong type.
-- `ValueError` - `font_size` is not greater than **0**, or the image is too small for the chosen scale.
+- `ValueError` - `font_size` is not greater than **0**, `remove_background` is not a known mode, or the image is too small for the chosen scale.
 - `FileNotFoundError` - the input file does not exist.
 - `OSError` - a file cannot be read or written *(e.g. a missing output directory or no permission)*.
 - `RuntimeError` - a path starts with `~user` for a user that does not exist.

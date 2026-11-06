@@ -2,6 +2,7 @@ import math
 import os
 import time
 import warnings
+from collections import deque
 from io import BytesIO
 from pathlib import Path
 from typing import Final
@@ -101,6 +102,19 @@ class ImgConverter:
         "nxrjft/\\|()1}{][?-_+~i!lI;:,\"^`'. ",
     }
 
+    #################### Background removal ####################
+
+    # Accepted remove_background modes: "simple" clears the background
+    # characters everywhere, "smart" only where they connect to the top, left
+    # or right edge
+    BACKGROUND_MODES: Final[tuple[str, ...]] = ("simple", "smart")
+
+    # How many of the most common edge characters can count as background
+    _BACKGROUND_MAX_CHARS: Final[int] = 3
+
+    # Minimum share of the edge cells a character needs to count as background
+    _BACKGROUND_MIN_SHARE: Final[float] = 0.05
+
     #################### Limits ####################
 
     # Largest allowed scale, one character averages a 2 ** scale x 2 ** scale
@@ -153,6 +167,7 @@ class ImgConverter:
         self._advanced_set: bool | None = None
         self._skip_rows: bool | None = None
         self._invert: bool | None = None
+        self._remove_background: str | None = None
 
     def _clear_cache(self) -> None:
         """
@@ -165,6 +180,7 @@ class ImgConverter:
         self._advanced_set = None
         self._skip_rows = None
         self._invert = None
+        self._remove_background = None
 
     def _convert_to_grayscale(self, image: Image.Image) -> npt.NDArray[np.uint8]:
         """
@@ -204,7 +220,12 @@ class ImgConverter:
         return np.round(luma).astype(np.uint8)
 
     def _convert_to_ascii(
-        self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
+        self,
+        scale: int,
+        advanced_set: bool,
+        skip_rows: bool,
+        invert: bool,
+        remove_background: str | None,
     ) -> None:
         """
         Rebuild the cached ASCII art from the loaded image, one block of
@@ -222,6 +243,10 @@ class ImgConverter:
 
         :param invert: Flip brightness, for light text on a dark background.
         :type invert: bool
+
+        :param remove_background: Background removal mode from
+            BACKGROUND_MODES, or None to keep the background.
+        :type remove_background: str | None
         """
 
         # Step 1: Character set as an array, so a whole array of indices can be
@@ -275,11 +300,123 @@ class ImgConverter:
         )
         self._ascii_array = chars[char_indices]
 
-        # Step 9: Remember the arguments this result was made with, for the cache check.
+        # Step 9: Optional background removal: the characters that dominate the
+        # image edges are replaced with spaces.
+        if remove_background is not None and self._ascii_array.size > 0:
+            self._remove_background_chars(remove_background)
+
+        # Step 10: Remember the arguments this result was made with, for the
+        # cache check.
         self._scale = clamped_scale
         self._advanced_set = advanced_set
         self._skip_rows = skip_rows
         self._invert = invert
+        self._remove_background = remove_background
+
+    def _find_background_chars(self) -> list[str]:
+        """
+        Pick the characters that make up the background of the cached ASCII
+        art, from its top row and its left and right columns.
+
+        The bottom row is skipped, because a subject often reaches the bottom
+        edge. Spaces are skipped, because they are already empty.
+
+        :return: Up to _BACKGROUND_MAX_CHARS characters, most common first.
+        :rtype: list[str]
+        """
+
+        edges: npt.NDArray[np.str_] = np.concatenate(
+            (
+                self._ascii_array[0, :],
+                self._ascii_array[1:, 0],
+                self._ascii_array[1:, -1],
+            )
+        )
+        characters: npt.NDArray[np.str_]
+        counts: npt.NDArray[np.int64]
+        characters, counts = np.unique(edges, return_counts=True)
+
+        # A character seen on only a few edge cells is more likely part of the
+        # subject touching the edge than background.
+        min_count: float = self._BACKGROUND_MIN_SHARE * edges.size
+
+        background: list[str] = []
+        index: int
+        for index in np.argsort(counts, kind="stable")[::-1]:
+            if (
+                counts[index] < min_count
+                or len(background) == self._BACKGROUND_MAX_CHARS
+            ):
+                break
+            if characters[index] != " ":
+                background.append(str(characters[index]))
+
+        return background
+
+    def _remove_background_chars(self, mode: str) -> None:
+        """
+        Replace the background characters of the cached ASCII art with
+        spaces.
+
+        :param mode: "simple" clears every occurrence of a background
+            character, "smart" only the ones connected to the top, left or
+            right edge through other background characters, so areas of the
+            same brightness inside the subject stay.
+        :type mode: str
+        """
+
+        background: list[str] = self._find_background_chars()
+        if not background:
+            return
+
+        is_background: npt.NDArray[np.bool_] = np.isin(self._ascii_array, background)
+        if mode == "simple":
+            self._ascii_array[is_background] = " "
+            return
+
+        # Flood fill from the edges: a breadth-first search through
+        # neighbouring background cells, up, down, left and right. Plain lists
+        # are used because indexing them is much faster than indexing numpy
+        # arrays one element at a time.
+        height: int
+        width: int
+        height, width = self._ascii_array.shape
+        candidates: list[list[bool]] = is_background.tolist()
+        reached: list[list[bool]] = [[False] * width for _ in range(height)]
+        queue: deque[tuple[int, int]] = deque()
+
+        seeds: list[tuple[int, int]] = (
+            [(0, col) for col in range(width)]
+            + [(row, 0) for row in range(height)]
+            + [(row, width - 1) for row in range(height)]
+        )
+        row: int
+        col: int
+        for row, col in seeds:
+            if candidates[row][col] and not reached[row][col]:
+                reached[row][col] = True
+                queue.append((row, col))
+
+        next_row: int
+        next_col: int
+        while queue:
+            row, col = queue.popleft()
+            for next_row, next_col in (
+                (row - 1, col),
+                (row + 1, col),
+                (row, col - 1),
+                (row, col + 1),
+            ):
+                if (
+                    0 <= next_row < height
+                    and 0 <= next_col < width
+                    and candidates[next_row][next_col]
+                    and not reached[next_row][next_col]
+                ):
+                    reached[next_row][next_col] = True
+                    queue.append((next_row, next_col))
+
+        self._ascii_array[np.array(reached, dtype=bool)] = " "
 
     def _linear_to_srgb(self, linear: npt.NDArray[np.float32]) -> npt.NDArray[np.uint8]:
         """
@@ -317,7 +454,12 @@ class ImgConverter:
         return max(0, min(scale, self.MAX_SCALE))
 
     def _validate_conversion_args(
-        self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
+        self,
+        scale: int,
+        advanced_set: bool,
+        skip_rows: bool,
+        invert: bool,
+        remove_background: str | None,
     ) -> None:
         """
         Check the conversion arguments and reject a conversion that is
@@ -338,7 +480,11 @@ class ImgConverter:
         :param invert: Whether brightness inversion is requested.
         :type invert: bool
 
+        :param remove_background: The requested background removal mode.
+        :type remove_background: str | None
+
         :raises TypeError: When an argument has the wrong type.
+        :raises ValueError: When remove_background is not a known mode.
         :raises ImageNotLoadedError: When no image is loaded yet.
         """
 
@@ -354,6 +500,15 @@ class ImgConverter:
 
         if not isinstance(invert, bool):
             raise TypeError("invert must be a boolean")
+
+        if remove_background is not None:
+            if not isinstance(remove_background, str):
+                raise TypeError("remove_background must be a string or None")
+            if remove_background not in self.BACKGROUND_MODES:
+                raise ValueError(
+                    f"unknown remove_background mode: {remove_background}, "
+                    f"expected one of: {', '.join(self.BACKGROUND_MODES)}"
+                )
 
         if self._img_array is None:
             raise ImageNotLoadedError("no image loaded, load one first")
@@ -386,7 +541,12 @@ class ImgConverter:
         return "\n".join("".join(row) for row in self._ascii_array)
 
     def _needs_conversion(
-        self, scale: int, advanced_set: bool, skip_rows: bool, invert: bool
+        self,
+        scale: int,
+        advanced_set: bool,
+        skip_rows: bool,
+        invert: bool,
+        remove_background: str | None,
     ) -> bool:
         """
         Check whether the cached ASCII art still matches the requested
@@ -407,6 +567,9 @@ class ImgConverter:
         :param invert: Whether brightness inversion is requested.
         :type invert: bool
 
+        :param remove_background: The requested background removal mode.
+        :type remove_background: str | None
+
         :return: True when ``_convert_to_ascii`` has to run again.
         :rtype: bool
         """
@@ -419,6 +582,7 @@ class ImgConverter:
             or advanced_set != self._advanced_set
             or skip_rows != self._skip_rows
             or invert != self._invert
+            or remove_background != self._remove_background
         )
 
     def _is_supported_format(self, image_format: str | None) -> bool:
@@ -697,6 +861,7 @@ class ImgConverter:
         advanced_set: bool = False,
         skip_rows: bool = False,
         invert: bool = False,
+        remove_background: str | None = None,
     ) -> npt.NDArray[np.str_]:
         """
         Convert the loaded image to ASCII art and return it as an array.
@@ -717,18 +882,32 @@ class ImgConverter:
         :param invert: Flip brightness, for light text on a dark background.
         :type invert: bool
 
+        :param remove_background: "simple" or "smart" to replace the
+            background with spaces, None to keep it. The background is made
+            of the most common characters on the top, left and right edges;
+            "simple" clears them everywhere, "smart" only where they
+            connect to those edges.
+        :type remove_background: str | None
+
         :return: One character per block, one row per output line, a copy of
             the cached result.
         :rtype: npt.NDArray[np.str_]
 
         :raises TypeError: When an argument has the wrong type.
+        :raises ValueError: When remove_background is not a known mode.
         :raises ImageNotLoadedError: When no image is loaded yet.
         """
 
-        self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
+        self._validate_conversion_args(
+            scale, advanced_set, skip_rows, invert, remove_background
+        )
 
-        if self._needs_conversion(scale, advanced_set, skip_rows, invert):
-            self._convert_to_ascii(scale, advanced_set, skip_rows, invert)
+        if self._needs_conversion(
+            scale, advanced_set, skip_rows, invert, remove_background
+        ):
+            self._convert_to_ascii(
+                scale, advanced_set, skip_rows, invert, remove_background
+            )
 
         return self._ascii_array.copy()
 
@@ -738,6 +917,7 @@ class ImgConverter:
         advanced_set: bool = False,
         skip_rows: bool = True,
         invert: bool = False,
+        remove_background: str | None = None,
     ) -> str:
         """
         Convert the loaded image to ASCII art and return it as one string.
@@ -758,19 +938,32 @@ class ImgConverter:
         :param invert: Flip brightness, for light text on a dark background.
         :type invert: bool
 
+        :param remove_background: "simple" or "smart" to replace the
+            background with spaces, None to keep it. The background is made
+            of the most common characters on the top, left and right edges;
+            "simple" clears them everywhere, "smart" only where they
+            connect to those edges.
+        :type remove_background: str | None
+
         :return: The ASCII art with a newline between rows.
         :rtype: str
 
         :raises TypeError: When an argument has the wrong type.
         :raises ImageNotLoadedError: When no image is loaded yet.
-        :raises ValueError: When the image is smaller than one block and
-            the result is empty.
+        :raises ValueError: When remove_background is not a known mode, or
+            the image is smaller than one block and the result is empty.
         """
 
-        self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
+        self._validate_conversion_args(
+            scale, advanced_set, skip_rows, invert, remove_background
+        )
 
-        if self._needs_conversion(scale, advanced_set, skip_rows, invert):
-            self._convert_to_ascii(scale, advanced_set, skip_rows, invert)
+        if self._needs_conversion(
+            scale, advanced_set, skip_rows, invert, remove_background
+        ):
+            self._convert_to_ascii(
+                scale, advanced_set, skip_rows, invert, remove_background
+            )
 
         return self._ascii_to_string()
 
@@ -780,6 +973,7 @@ class ImgConverter:
         advanced_set: bool = False,
         skip_rows: bool = True,
         invert: bool = False,
+        remove_background: str | None = None,
     ) -> None:
         """
         Convert the loaded image to ASCII art and print it to stdout.
@@ -800,17 +994,30 @@ class ImgConverter:
         :param invert: Flip brightness, for light text on a dark background.
         :type invert: bool
 
+        :param remove_background: "simple" or "smart" to replace the
+            background with spaces, None to keep it. The background is made
+            of the most common characters on the top, left and right edges;
+            "simple" clears them everywhere, "smart" only where they
+            connect to those edges.
+        :type remove_background: str | None
+
         :raises TypeError: When an argument has the wrong type.
         :raises ImageNotLoadedError: When no image is loaded yet.
-        :raises ValueError: When the image is smaller than one block and
-            the result is empty.
+        :raises ValueError: When remove_background is not a known mode, or
+            the image is smaller than one block and the result is empty.
         :raises OSError: When stdout cannot be written, e.g. a closed pipe.
         """
 
-        self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
+        self._validate_conversion_args(
+            scale, advanced_set, skip_rows, invert, remove_background
+        )
 
-        if self._needs_conversion(scale, advanced_set, skip_rows, invert):
-            self._convert_to_ascii(scale, advanced_set, skip_rows, invert)
+        if self._needs_conversion(
+            scale, advanced_set, skip_rows, invert, remove_background
+        ):
+            self._convert_to_ascii(
+                scale, advanced_set, skip_rows, invert, remove_background
+            )
 
         print(self._ascii_to_string())
 
@@ -823,6 +1030,7 @@ class ImgConverter:
         font_size: int = 12,
         skip_rows: bool = True,
         invert: bool = False,
+        remove_background: str | None = None,
     ) -> None:
         """
         Convert the loaded image to ASCII art and render it into an image
@@ -854,9 +1062,17 @@ class ImgConverter:
         :param invert: Flip brightness.
         :type invert: bool
 
+        :param remove_background: "simple" or "smart" to replace the
+            background with spaces, None to keep it. The background is made
+            of the most common characters on the top, left and right edges;
+            "simple" clears them everywhere, "smart" only where they
+            connect to those edges.
+        :type remove_background: str | None
+
         :raises TypeError: When an argument has the wrong type.
-        :raises ValueError: When font_size is not greater than 0, or the
-            image is smaller than one block and the result is empty.
+        :raises ValueError: When font_size is not greater than 0,
+            remove_background is not a known mode, or the image is smaller
+            than one block and the result is empty.
         :raises RuntimeError: When the path starts with ~ of an unknown user.
         :raises ImageNotLoadedError: When no image is loaded yet.
         :raises UnsupportedExtensionError: When the output format is not
@@ -879,12 +1095,18 @@ class ImgConverter:
         if font_size <= 0:
             raise ValueError("font_size must be greater than 0")
 
-        self._validate_conversion_args(scale, advanced_set, skip_rows, invert)
+        self._validate_conversion_args(
+            scale, advanced_set, skip_rows, invert, remove_background
+        )
 
         self._get_font(font_size)
 
-        if self._needs_conversion(scale, advanced_set, skip_rows, invert):
-            self._convert_to_ascii(scale, advanced_set, skip_rows, invert)
+        if self._needs_conversion(
+            scale, advanced_set, skip_rows, invert, remove_background
+        ):
+            self._convert_to_ascii(
+                scale, advanced_set, skip_rows, invert, remove_background
+            )
 
         output_path: Path = Path(out_path).expanduser().resolve()
         out_format: str = output_path.suffix.lstrip(".")

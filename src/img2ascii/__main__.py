@@ -83,6 +83,18 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "-r",
+        "--remove-background",
+        choices=ImgConverter.BACKGROUND_MODES,
+        default=None,
+        help=(
+            "replace the background with spaces: simple clears the most common "
+            "edge characters everywhere, smart only where they touch the top, "
+            "left or right edge"
+        ),
+    )
+
     args: argparse.Namespace = parser.parse_args()
     # A dark terminal needs inverted brightness, a saved image (black text on
     # white) does not.
@@ -104,6 +116,7 @@ def main() -> None:
                 font_size=args.font_size,
                 skip_rows=True,
                 invert=invert,
+                remove_background=args.remove_background,
             )
             print(f"Saved to: {args.output}")
         else:
@@ -112,6 +125,7 @@ def main() -> None:
                 advanced_set=args.advanced,
                 skip_rows=True,
                 invert=invert,
+                remove_background=args.remove_background,
             )
 
         # Force buffered output out here, so a closed pipe is reported inside
