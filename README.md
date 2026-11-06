@@ -93,7 +93,7 @@ All options:
 - `--font-size <n>` - font size in pixels of the saved image, default **12**.
 - `--overwrite` - replace the output file if it already exists.
 - `--allow-redirects` - follow `HTTP` redirects, which are **blocked by default**.
-- `--invert` / `--no-invert` - invert brightness. **On by default when printing** (light text on a dark terminal), **off by default when saving** (black text on white).
+- `--no-invert` - print dark text for a light terminal theme. By default, printing **inverts brightness** for light text on a dark terminal. **Only affects printing**, a saved image is always black text on white.
 
 Exit codes:
 

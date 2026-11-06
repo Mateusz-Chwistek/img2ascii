@@ -74,19 +74,19 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--invert",
-        action=argparse.BooleanOptionalAction,
-        default=None,
+        "--no-invert",
+        action="store_true",
+        default=False,
         help=(
-            "invert brightness for light text on a dark background; on by default "
-            "when printing to the terminal, off when saving to an image"
+            "print dark text for a light terminal theme; only affects printing, "
+            "a saved image is never inverted"
         ),
     )
 
     args: argparse.Namespace = parser.parse_args()
     # A dark terminal needs inverted brightness, a saved image (black text on
     # white) does not.
-    invert: bool = args.invert if args.invert is not None else not args.output
+    invert: bool = not args.no_invert and not args.output
     converter: ImgConverter = ImgConverter()
 
     try:
